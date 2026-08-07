@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Food Journal</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #faf7f2;
+    --green: #3a5a30;
+    --brown: #b98d5e;
+    --border: #ddd2bd;
+    --text: #2b2b26;
+    --muted: #7a6f5c;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%;
+    font-family: Georgia, 'Times New Roman', serif;
+    background: var(--bg); color: var(--text);
+  }
+  #app { height: 100vh; display: flex; flex-direction: column; }
+
+  /* ---- Top bar ---- */
+  .topbar {
+    flex: 0 0 auto;
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 20px; border-bottom: 2px solid var(--brown);
+  }
+  .topbar h1 { font-size: 1.4rem; color: var(--green); margin: 0; }
+  .topbar input[type=text] {
+    flex: 1; max-width: 320px; padding: 6px 10px; font-size: 0.9rem;
+    border: 1px solid var(--border); border-radius: 6px; font-family: inherit;
+  }
+  button {
+    font-family: inherit; cursor: pointer; border: none; border-radius: 6px;
+    padding: 7px 14px; font-size: 0.85rem; background: var(--green); color: #fff;
+  }
+  button.secondary { background: #fff; color: var(--green); border: 1px solid var(--green); }
+  button.brown { background: var(--brown); }
+
+  /* ---- Board ---- */
+  .board { flex: 1 1 auto; display: flex; gap: 14px; padding: 14px 20px; overflow: hidden; }
+  .column { flex: 1; min-width: 0; display: flex; flex-direction: column; background: rgba(255,255,255,0.5); border: 1px solid var(--border); border-radius: 10px; }
+  .column-head { padding: 8px 12px; font-weight: bold; color: var(--muted); text-transform: uppercase; font-size: 0.8rem; letter-spacing: 0.05em; border-bottom: 1px solid var(--border); }
+  .column-body { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+
+  .rcard { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+  .rcard .rtitle { font-weight: bold; cursor: pointer; }
+  .rcard .rtitle:hover { text-decoration: underline; }
+  .rcard .rmeta { font-size: 0.75rem; color: var(--muted); margin: 4px 0; }
+  .pill { display: inline-block; background: #eee0c8; color: var(--green); border-radius: 10px; padding: 1px 8px; font-size: 0.7rem; margin-right: 4px; }
+  .rcard .ractions { display: flex; gap: 6px; margin-top: 6px; align-items: center; }
+  .rcard select { font-family: inherit; font-size: 0.75rem; padding: 2px; }
+  .no-photo-badge { font-size: 0.68rem; color: #8a5a2b; }
+
+  /* ---- Detail (tablet card) view ---- */
+  .detail { flex: 1 1 auto; display: flex; flex-direction: column; overflow: auto; }
+  .detail-bar { flex: 0 0 auto; padding: 8px 20px; display: flex; gap: 10px; align-items: center; border-bottom: 1px solid var(--border); }
+  .card-header {
+    position: relative; flex: 0 0 26vh; min-height: 140px;
+    background: linear-gradient(135deg, #d9c7a3, #b98d5e); background-size: cover; background-position: center;
+    display: flex; align-items: flex-end; padding: clamp(10px,2vh,22px) clamp(16px,3vw,40px);
+  }
+  .card-header::after { content:""; position:absolute; left:0; right:0; bottom:-1px; height:40%; background: linear-gradient(to top, rgba(250,247,242,0.95), rgba(250,247,242,0)); }
+  .card-header .title { position: relative; z-index: 1; font-size: clamp(1.3rem,3.2vh,2.1rem); font-weight: 700; color: var(--green); margin: 0; line-height: 1.1; }
+  .photo-pending-badge { position: absolute; top: 10px; right: 14px; font-size: 0.7rem; background: rgba(255,255,255,0.9); padding: 3px 9px; border-radius: 10px; color: #8a5a2b; z-index: 1; }
+  .meta-bar { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: clamp(10px,2vw,28px); padding: clamp(6px,1.4vh,14px) clamp(16px,3vw,40px); font-size: clamp(0.75rem,1.6vh,0.95rem); border-bottom: 1px solid var(--border); }
+  .meta-bar b { color: var(--text); }
+  .meta-bar .tags { margin-left: auto; font-style: italic; color: var(--muted); }
+  .content-grid { flex: 1 1 auto; display: grid; grid-template-columns: 1fr 1.3fr; gap: clamp(14px,2.5vw,36px); padding: clamp(12px,2vh,22px) clamp(16px,3vw,40px); overflow: auto; min-height: 0; }
+  .content-grid h2 { font-size: clamp(0.85rem,1.7vh,1.05rem); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 clamp(6px,1vh,10px); border-bottom: 2px solid var(--brown); padding-bottom: 4px; }
+  .content-grid ul, .content-grid ol { margin: 0; padding-left: 1.1em; font-size: clamp(0.8rem,1.7vh,1rem); line-height: 1.5; }
+  .content-grid ul { list-style: none; padding-left: 0; }
+  .content-grid li { padding: 3px 0; }
+  .content-grid ul li { border-bottom: 1px dotted var(--border); }
+
+  /* ---- Add form ---- */
+  .form-view { flex: 1 1 auto; overflow: auto; padding: 16px 24px; max-width: 700px; }
+  .form-view label { display: block; font-size: 0.8rem; color: var(--muted); margin: 12px 0 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .form-view input[type=text], .form-view textarea { width: 100%; padding: 8px; font-family: inherit; font-size: 0.9rem; border: 1px solid var(--border); border-radius: 6px; }
+  .form-view textarea { min-height: 90px; }
+  .tagbox { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+  .tagbox label { text-transform: none; font-size: 0.85rem; color: var(--text); margin: 0; display: flex; align-items: center; gap: 4px; }
+  .row3 { display: flex; gap: 14px; }
+  .row3 > div { flex: 1; }
+  .hint { font-size: 0.78rem; color: var(--muted); background: #fff8ea; border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin-top: 10px; }
+
+  /* ---- Modal ---- */
+  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: flex; align-items: center; justify-content: center; z-index: 50; }
+  .modal { background: #fff; border-radius: 10px; padding: 22px 26px; max-width: 380px; text-align: center; }
+  .modal h3 { margin-top: 0; color: var(--green); }
+  .modal .opts { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 14px; }
+  .grid10 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-top: 14px; }
+  .grid10 button { background: #fff; color: var(--green); border: 1px solid var(--green); }
+  .grid10 button:hover { background: var(--green); color: #fff; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+(function () {
+  const STORAGE_KEY = 'foodJournalV1';
+
+  // Recipes I (Claude) have parsed so far. New recipes captured via screenshot/URL in
+  // chat get added here by regenerating this artifact; recipes typed directly by the
+  // user are added straight into localStorage via the in-app "Add Recipe" form.
+  const SEED_RECIPES = [
+    {
+      id: 'goose-chocolate-chip-cookies',
+      title: "Goose's Chocolate Chip Cookies",
+      tags: ['Dessert'],
+      shelf: 'To Make',
+      rating: null,
+      image: null,
+      imageStatus: 'pending', // pending | has-photo | ai-pending
+      nextPhotoPromptAt: null,
+      oven: '350°F',
+      bakeTime: '10-12 min',
+      prepTime: '',
+      servings: '',
+      dateAdded: '2026-07-14',
+      ingredients: [
+        '1 cup salted butter',
+        '1 1/4 cups brown sugar',
+        '1 1/3 cups granulated sugar',
+        '1 large egg + 2 egg yolks (room temp)',
+        '1 tablespoon vanilla',
+        '2 cups all-purpose flour',
+        '3/4 tsp baking soda',
+        '1/2 tsp salt',
+        '1 cup semi-sweet chocolate chips',
+        '1 cup dark chocolate chips/chunks (preferred)'
+      ],
+      instructions: [
+        'Whisk together flour, baking soda, and salt.',
+        'In a pan over medium heat, add the butter. Cook 5-6 minutes until it bubbles, then browns. Transfer to a bowl and cool.',
+        'In a large bowl, add brown sugar and granulated sugar, then pour in the butter. Mix until combined. Add the egg, egg yolks, and vanilla. Whisk until smooth.',
+        'Add wet ingredients into dry and mix to form dough.',
+        'Mix in chocolate chips and let dough rest 15-20 minutes.',
+        'Line a sheet pan with parchment paper.',
+        'Scoop dough into 1/4 to 1/3 cup portions, spaced about 6 per sheet.',
+        'Bake ~10 minutes until edges are golden and centers still soft. Cookies continue baking on the pan after coming out of the oven.'
+      ]
+    },
+    {
+      id: 'altons-chocolate-ice-cream',
+      title: "Alton Brown's Chocolate Ice Cream",
+      tags: ['Dessert'],
+      shelf: 'To Make',
+      rating: null,
+      image: null,
+      imageStatus: 'pending',
+      nextPhotoPromptAt: null,
+      oven: '',
+      bakeTime: '',
+      prepTime: '20 min active / ~9 hrs total (incl. chilling & freezing)',
+      servings: '2 quarts',
+      dateAdded: '2026-07-27',
+      source: 'https://altonbrown.com/recipes/homemade-chocolate-ice-cream/',
+      ingredients: [
+        '1/2 cup Dutch-process cocoa powder',
+        '1 1/4 cups sugar',
+        '1/8 teaspoon kosher salt',
+        '8 large egg yolks',
+        '1 cup heavy cream',
+        '3 cups half and half',
+        '2 teaspoons vanilla extract'
+      ],
+      instructions: [
+        'Whisk the cocoa powder, sugar, and salt in a 3-quart saucepan. Add the egg yolks and whisk thoroughly. Whisk in the cream, then the half and half and vanilla extract. Turn heat to medium-low and cook, stirring frequently, until the custard thickens enough to coat the back of a spoon, 170-175°F. Remove from heat.',
+        'Fill a large bowl with ice cubes and water about halfway up the sides. Set a medium bowl directly over the ice water and pour the custard in. Whisk frequently until it reaches room temperature.',
+        'Pour the custard through a mesh strainer into a container that holds about 1 1/2 quarts. Cover tightly and refrigerate until below 40°F, at least 4 hours or overnight.',
+        "Pour into a prepped ice cream maker and process per the manufacturer's directions, about 20-30 minutes, until the motor starts to struggle as it thickens. Serve as soft serve, or freeze another 3-4 hours to harden."
+      ]
+    },
+    {
+      id: 'altons-avocado-ice-cream',
+      title: "Alton Brown's Avocado Ice Cream",
+      tags: ['Dessert'],
+      shelf: 'To Make',
+      rating: null,
+      image: null,
+      imageStatus: 'pending',
+      nextPhotoPromptAt: null,
+      oven: '',
+      bakeTime: '',
+      prepTime: '15 min active / ~6 hrs 15 min total (incl. chilling)',
+      servings: '1 quart',
+      dateAdded: '2026-07-27',
+      source: 'https://altonbrown.com/recipes/avocado-ice-cream/',
+      ingredients: [
+        '12 ounces avocado flesh (about 3 medium avocados)',
+        '1 tablespoon freshly squeezed lemon juice',
+        '1 1/2 cups whole milk',
+        '1/2 cup sugar',
+        '1 cup heavy cream'
+      ],
+      instructions: [
+        'Halve the avocados, remove pits, and scoop out the flesh with a large spoon.',
+        'Place avocado, lemon juice, milk, and sugar in a blender and puree until smooth.',
+        'Reduce blender speed to low and slowly add the cream.',
+        'Chill the mixture in an air-tight container until it reaches 40°F or below, 4 to 6 hours.',
+        "Process in an ice cream maker per the manufacturer's directions. This mixture sets up fast — only about 5-10 minutes to soft-serve consistency.",
+        'Serve immediately, or harden in the freezer for 3-4 hours for a firmer texture.'
+      ]
+    },
+    {
+      id: 'altons-overnight-cinnamon-rolls',
+      title: "Alton Brown's Overnight Cinnamon Rolls",
+      tags: ['Dessert'],
+      shelf: 'To Make',
+      rating: null,
+      image: null,
+      imageStatus: 'pending',
+      nextPhotoPromptAt: null,
+      oven: '200°F, then 350°F',
+      bakeTime: '25-30 min (plus 30 min proof)',
+      prepTime: '1 hr 15 min active / 12 hrs total (incl. overnight rise)',
+      servings: '8',
+      dateAdded: '2026-07-27',
+      source: 'https://altonbrown.com/recipes/overnight-cinnamon-rolls/',
+      ingredients: [
+        '— FOR THE DOUGH —',
+        '3/4 cup buttermilk, room temperature',
+        '6 tablespoons unsalted butter, melted',
+        '1/4 cup granulated sugar',
+        '1 large egg, plus 4 large egg yolks, room temperature',
+        '3 1/3 cups all-purpose flour',
+        '1 package rapid rise yeast',
+        '1 1/4 teaspoons kosher salt',
+        '— FOR THE FILLING & ASSEMBLY —',
+        '1 teaspoon cold unsalted butter (for the pan)',
+        '1 1/2 tablespoons unsalted butter, melted (for brushing)',
+        '1 packed cup light brown sugar',
+        '1 tablespoon ground cinnamon',
+        'Pinch kosher salt',
+        'All-purpose flour, for rolling',
+        '— FOR THE ICING —',
+        '1/4 cup cream cheese, room temperature',
+        '3 tablespoons milk',
+        "1 1/2 cups confectioners' sugar"
+      ],
+      instructions: [
+        'Make the Dough: Combine the buttermilk, butter, sugar, whole egg, and egg yolks in a stand mixer with the paddle attachment; beat on medium speed.',
+        'As it comes together, add about 2 cups (283g) of the flour, the yeast, and salt; continue beating until combined.',
+        'Swap to the dough hook, add about 1 more cup (113g) flour, and knead on low 5 minutes. Dough should feel soft and moist but not sticky (add more flour 1/4 cup at a time if needed). Knead until the dough clears the sides of the bowl, about 5 more minutes.',
+        'Turn dough onto a floured surface and form into a smooth ball. Place in a large oiled bowl, turning to coat. Cover and let rise until doubled, about 3 hours.',
+        'Make the Filling and Assemble: Butter a 9x13-inch glass baking dish with the cold butter. Combine brown sugar, cinnamon, and salt in a bowl.',
+        'Turn dough onto a floured surface and shape into an 18x12-inch rectangle with a rolling pin.',
+        'Brush with melted butter, leaving a 1-inch border at the top. Sprinkle the brown sugar mixture over, avoiding the border, and press gently into the dough.',
+        'Roll into a tight cylinder starting from the long edge nearest you. Pinch the seam to seal. Cut into 8 rolls, about 2 inches each.',
+        'Arrange rolls cut-side down in the baking dish. Cover tightly and refrigerate overnight, up to 16 hours.',
+        'To Bake: Heat oven to 200°F, then turn it off and place the rolls inside. Let rise until slightly puffy, about 30 minutes.',
+        'Without removing the rolls, raise oven temperature to 350°F and bake until internal temperature reaches 190°F, 25-30 minutes. Let cool while making the icing.',
+        'Make the Icing: Beat cream cheese until creamy, add milk, and beat to combine. Sift in confectioners\' sugar and beat until smooth. Spread over rolls and serve immediately.'
+      ]
+    },
+    {
+      id: 'pan-seared-zucchini-and-corn',
+      title: 'Pan-Seared Zucchini and Corn',
+      tags: ['Side'],
+      shelf: 'To Make',
+      rating: null,
+      image: null,
+      imageStatus: 'pending',
+      nextPhotoPromptAt: null,
+      oven: '',
+      bakeTime: '',
+      prepTime: '~20 min, stovetop only',
+      servings: '4',
+      dateAdded: '2026-07-27',
+      source: 'cookbook photo capture',
+      ingredients: [
+        '3 tablespoons vegetable oil',
+        '4 ears corn, shucked and kernels removed (about 3 cups kernels)',
+        '1 medium onion, finely diced (about 1 cup)',
+        '1 jalapeño pepper, seeds and ribs removed and finely minced',
+        '2 medium cloves garlic, minced or grated on a Microplane (about 2 teaspoons)',
+        '2 cups zucchini cut into 1/2-inch cubes (about 2 medium)',
+        '1/4 cup chopped fresh basil or parsley',
+        '3 tablespoons lemon juice (from 2 lemons)',
+        '2 tablespoons extra-virgin olive oil',
+        'Kosher salt and freshly ground black pepper',
+        'Freshly grated Parmigiano-Reggiano (optional)'
+      ],
+      instructions: [
+        'Heat half of the oil in a 12-inch stainless steel or cast-iron skillet over high heat until smoking. Add the corn, toss once or twice, and cook without stirring until charred on the first side, about 2 minutes. Toss and cook until charred on a second side, about 2 minutes longer. Continue tossing and cooking until well charred all over, about 10 minutes total. Add the onion and jalapeño and cook, tossing and stirring, until softened, about 1 minute. Add the garlic and cook, stirring, until fragrant, about 1 minute. Transfer to a bowl.',
+        'Rinse out the pan (there might be some sugars burnt onto the bottom, but they should come off easily with water). Add the remaining oil and heat until smoking over high heat. Add the zucchini and cook, without stirring, until well charred on the first side, about 2 minutes. Toss the zucchini and char once more, about 2 minutes longer, then transfer to the bowl with the corn.',
+        'Fold in the basil, lemon juice, and olive oil, and season to taste with salt and pepper. Serve immediately, sprinkled with Parmesan if desired.'
+      ]
+    }
+  ];
+
+  const TAG_KEYWORDS = {
+    'Dessert': ['cookie','cake','pie','brownie','cupcake','dessert','sweet','chocolate','ice cream','pudding','frosting'],
+    'Appetizer': ['dip','appetizer','starter','bite','wing','nacho','bruschetta'],
+    'Side': ['side dish','side','salad','rice','mashed potatoes','vegetable','slaw','stuffing'],
+    'Main Dish': ['chicken','beef','pork','pasta','pizza','soup','casserole','burger','salmon','fish','taco','stew']
+  };
+
+  function slugify(s) {
+    return s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+  }
+
+  function load() {
+    let recipes = [];
+    try { recipes = JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch (e) { recipes = []; }
+    let changed = false;
+    SEED_RECIPES.forEach(seed => {
+      if (!recipes.find(r => r.id === seed.id)) { recipes.push(seed); changed = true; }
+    });
+    if (changed) save(recipes);
+    return recipes;
+  }
+  function save(recipes) { localStorage.setItem(STORAGE_KEY, JSON.stringify(recipes)); }
+
+  let recipes = load();
+  let view = { mode: 'board', recipeId: null, search: '' };
+
+  function autoTag(text) {
+    const lower = text.toLowerCase();
+    let scores = {};
+    Object.keys(TAG_KEYWORDS).forEach(tag => {
+      scores[tag] = TAG_KEYWORDS[tag].reduce((n, kw) => n + (lower.includes(kw) ? 1 : 0), 0);
+    });
+    let best = Object.keys(scores).reduce((a, b) => scores[b] > scores[a] ? b : a);
+    return scores[best] > 0 ? [best] : ['Main Dish'];
+  }
+
+  const app = document.getElementById('app');
+
+  function render() {
+    if (view.mode === 'board') renderBoard();
+    else if (view.mode === 'detail') renderDetail();
+    else if (view.mode === 'form') renderForm();
+  }
+
+  function renderBoard() {
+    const shelves = ['To Make', 'Making', 'Made'];
+    const q = view.search.toLowerCase();
+    const filtered = recipes.filter(r =>
+      !q || r.title.toLowerCase().includes(q) || r.tags.some(t => t.toLowerCase().includes(q))
+    );
+
+    app.innerHTML = `
+      <div class="topbar">
+        <h1>Food Journal</h1>
+        <input type="text" id="searchBox" placeholder="Search by name or tag..." value="${escapeHtml(view.search)}">
+        <button id="addBtn">+ Add Recipe</button>
+      </div>
+      <div class="board">
+        ${shelves.map(shelf => {
+          const items = filtered.filter(r => r.shelf === shelf);
+          return `
+            <div class="column">
+              <div class="column-head">${shelf} (${items.length})</div>
+              <div class="column-body">
+                ${items.map(r => cardHtml(r)).join('') || '<div class="rmeta">No recipes here yet.</div>'}
+              </div>
+            </div>`;
+        }).join('')}
+      </div>
+    `;
+
+    document.getElementById('searchBox').oninput = e => { view.search = e.target.value; renderBoard(); };
+    document.getElementById('addBtn').onclick = () => { view.mode = 'form'; render(); };
+    recipes.forEach(r => {
+      const t = document.getElementById('title-' + r.id);
+      if (t) t.onclick = () => openRecipe(r.id);
+      const sel = document.getElementById('shelf-' + r.id);
+      if (sel) sel.onchange = e => moveShelf(r.id, e.target.value);
+    });
+  }
+
+  function cardHtml(r) {
+    const ratingBadge = r.rating != null ? `<span class="pill">${r.rating}/10</span>` : '';
+    const photoBadge = r.imageStatus === 'has-photo' ? '' : `<div class="no-photo-badge">No final photo yet</div>`;
+    return `
+      <div class="rcard">
+        <div class="rtitle" id="title-${r.id}">${escapeHtml(r.title)}</div>
+        <div class="rmeta">${r.tags.map(t => `<span class="pill">${escapeHtml(t)}</span>`).join('')} ${ratingBadge}</div>
+        ${photoBadge}
+        <div class="ractions">
+          <select id="shelf-${r.id}">
+            <option value="To Make" ${r.shelf === 'To Make' ? 'selected' : ''}>To Make</option>
+            <option value="Making" ${r.shelf === 'Making' ? 'selected' : ''}>Making</option>
+            <option value="Made" ${r.shelf === 'Made' ? 'selected' : ''}>Made</option>
+          </select>
+        </div>
+      </div>`;
+  }
+
+  function moveShelf(id, newShelf) {
+    const r = recipes.find(x => x.id === id);
+    if (!r) return;
+    if (newShelf === 'Made' && r.rating == null) {
+      showRatingModal(r, () => { r.shelf = 'Made'; save(recipes); renderBoard(); });
+      return;
+    }
+    r.shelf = newShelf;
+    save(recipes);
+    renderBoard();
+  }
+
+  function showRatingModal(r, onDone) {
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay';
+    overlay.innerHTML = `
+      <div class="modal">
+        <h3>Rate "${escapeHtml(r.title)}"</h3>
+        <div>How would you rate it, 1-10?</div>
+        <div class="grid10">
+          ${[1,2,3,4,5,6,7,8,9,10].map(n => `<button data-n="${n}">${n}</button>`).join('')}
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    overlay.querySelectorAll('button[data-n]').forEach(btn => {
+      btn.onclick = () => {
+        r.rating = parseInt(btn.dataset.n, 10);
+        save(recipes);
+        document.body.removeChild(overlay);
+        onDone();
+      };
+    });
+  }
+
+  function openRecipe(id) {
+    view.mode = 'detail';
+    view.recipeId = id;
+    render();
+  }
+
+  function maybeShowPhotoPrompt(r) {
+    if (r.imageStatus === 'has-photo' || r.imageStatus === 'ai-pending') return;
+    if (r.nextPhotoPromptAt && Date.now() < r.nextPhotoPromptAt) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay';
+    overlay.innerHTML = `
+      <div class="modal">
+        <h3>Add a photo?</h3>
+        <div>This recipe doesn't have a final photo yet. Upload one now, or remind me later?</div>
+        <div class="opts">
+          <button id="photoNow">Now</button>
+          <button id="photo30" class="secondary">In 30 min</button>
+          <button id="photo60" class="secondary">In 60 min</button>
+          <button id="photoSkip" class="secondary">Skip</button>
+        </div>
+        <input type="file" id="photoFile" accept="image/*" class="hidden" style="margin-top:10px;">
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => document.body.removeChild(overlay);
+    document.getElementById('photoNow').onclick = () => {
+      const fi = document.getElementById('photoFile');
+      fi.classList.remove('hidden');
+      fi.click();
+    };
+    document.getElementById('photoFile').onchange = e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = ev => {
+        r.image = ev.target.result;
+        r.imageStatus = 'has-photo';
+        r.nextPhotoPromptAt = null;
+        save(recipes);
+        close();
+        renderDetail();
+      };
+      reader.readAsDataURL(file);
+    };
+    document.getElementById('photo30').onclick = () => {
+      r.nextPhotoPromptAt = Date.now() + 30 * 60 * 1000;
+      save(recipes); close();
+    };
+    document.getElementById('photo60').onclick = () => {
+      r.nextPhotoPromptAt = Date.now() + 60 * 60 * 1000;
+      save(recipes); close();
+    };
+    document.getElementById('photoSkip').onclick = () => {
+      r.imageStatus = 'ai-pending';
+      r.nextPhotoPromptAt = null;
+      save(recipes); close();
+      renderDetail();
+    };
+  }
+
+  function openChangePhotoModal(r) {
+    const hasPhoto = r.imageStatus === 'has-photo';
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay';
+    overlay.innerHTML = `
+      <div class="modal">
+        <h3>${hasPhoto ? 'Replace Photo' : 'Add a Photo'}</h3>
+        <div>${hasPhoto ? 'Choose a new photo to replace the current one.' : 'Choose a photo for this recipe.'}</div>
+        <div class="opts">
+          <button id="changePhotoChoose">Choose Photo</button>
+          <button id="changePhotoCancel" class="secondary">Cancel</button>
+        </div>
+        <input type="file" id="changePhotoFile" accept="image/*" class="hidden" style="margin-top:10px;">
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => document.body.removeChild(overlay);
+    document.getElementById('changePhotoChoose').onclick = () => {
+      document.getElementById('changePhotoFile').click();
+    };
+    document.getElementById('changePhotoFile').onchange = e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = ev => {
+        r.image = ev.target.result;
+        r.imageStatus = 'has-photo';
+        r.nextPhotoPromptAt = null;
+        save(recipes);
+        close();
+        renderDetail();
+      };
+      reader.readAsDataURL(file);
+    };
+    document.getElementById('changePhotoCancel').onclick = () => close();
+  }
+
+  function renderDetail() {
+    const r = recipes.find(x => x.id === view.recipeId);
+    if (!r) { view.mode = 'board'; return render(); }
+
+    const headerStyle = r.imageStatus === 'has-photo'
+      ? `style="background-image:url('${r.image}');"`
+      : '';
+    const photoBadge = r.imageStatus === 'has-photo' ? '' :
+      `<span class="photo-pending-badge">${r.imageStatus === 'ai-pending' ? 'Photo pending (AI gen not connected)' : 'Photo pending'}</span>`;
+
+    app.innerHTML = `
+      <div class="detail">
+        <div class="detail-bar">
+          <button class="secondary" id="backBtn">&larr; Board</button>
+          <span style="color:var(--muted); font-size:0.85rem;">Shelf: <b>${r.shelf}</b>${r.rating != null ? ` &middot; Rating: <b>${r.rating}/10</b>` : ''}</span>
+          <button class="secondary" id="changePhotoBtn" style="margin-left:auto;">${r.imageStatus === 'has-photo' ? 'Replace Photo' : 'Change Photo'}</button>
+        </div>
+        <div class="card-header" ${headerStyle}>
+          ${photoBadge}
+          <p class="title">${escapeHtml(r.title)}</p>
+        </div>
+        <div class="meta-bar">
+          ${r.oven ? `<span><b>Oven:</b> ${escapeHtml(r.oven)}</span>` : ''}
+          ${r.bakeTime ? `<span><b>Bake Time:</b> ${escapeHtml(r.bakeTime)}</span>` : ''}
+          ${r.prepTime ? `<span><b>Prep Time:</b> ${escapeHtml(r.prepTime)}</span>` : ''}
+          ${r.servings ? `<span><b>Serves:</b> ${escapeHtml(r.servings)}</span>` : ''}
+          <span class="tags">${r.tags.join(', ')}</span>
+        </div>
+        <div class="content-grid">
+          <div class="col">
+            <h2>Ingredients</h2>
+            <ul>${r.ingredients.map(i => `<li>${escapeHtml(i)}</li>`).join('')}</ul>
+          </div>
+          <div class="col">
+            <h2>Instructions</h2>
+            <ol>${r.instructions.map(i => `<li>${escapeHtml(i)}</li>`).join('')}</ol>
+          </div>
+        </div>
+      </div>`;
+
+    document.getElementById('backBtn').onclick = () => { view.mode = 'board'; render(); };
+    document.getElementById('changePhotoBtn').onclick = () => openChangePhotoModal(r);
+    maybeShowPhotoPrompt(r);
+  }
+
+  function renderForm() {
+    app.innerHTML = `
+      <div class="topbar">
+        <button class="secondary" id="cancelBtn">&larr; Board</button>
+        <h1>Add a Recipe</h1>
+      </div>
+      <div class="form-view">
+        <div class="hint">
+          Type a recipe in directly below. For a screenshot or a URL, send it to Claude in chat
+          and ask to add it to the journal &mdash; Claude will read it and drop it in here for you.
+        </div>
+        <label>Title</label>
+        <input type="text" id="f_title" placeholder="e.g. Goose's Chocolate Chip Cookies">
+        <div class="row3">
+          <div><label>Oven</label><input type="text" id="f_oven" placeholder="350°F"></div>
+          <div><label>Bake Time</label><input type="text" id="f_bake" placeholder="10-12 min"></div>
+          <div><label>Prep Time</label><input type="text" id="f_prep" placeholder="15 min"></div>
+        </div>
+        <label>Servings</label>
+        <input type="text" id="f_servings" placeholder="e.g. 4">
+        <label>Ingredients (one per line)</label>
+        <textarea id="f_ingredients" placeholder="1 cup flour&#10;2 eggs&#10;..."></textarea>
+        <label>Instructions (one step per line)</label>
+        <textarea id="f_instructions" placeholder="Preheat oven...&#10;Mix ingredients...&#10;..."></textarea>
+        <label>Tags <button class="secondary" id="autoTagBtn" style="font-size:0.7rem; padding:3px 8px;">Auto-tag</button></label>
+        <div class="tagbox">
+          <label><input type="checkbox" value="Appetizer" class="tagChk"> Appetizer</label>
+          <label><input type="checkbox" value="Main Dish" class="tagChk"> Main Dish</label>
+          <label><input type="checkbox" value="Side" class="tagChk"> Side</label>
+          <label><input type="checkbox" value="Dessert" class="tagChk"> Dessert</label>
+        </div>
+        <div style="margin-top:18px;">
+          <button id="saveBtn">Save Recipe</button>
+        </div>
+      </div>`;
+
+    document.getElementById('cancelBtn').onclick = () => { view.mode = 'board'; render(); };
+    document.getElementById('autoTagBtn').onclick = (e) => {
+      e.preventDefault();
+      const text = [
+        document.getElementById('f_title').value,
+        document.getElementById('f_ingredients').value,
+        document.getElementById('f_instructions').value
+      ].join(' ');
+      const tags = autoTag(text);
+      document.querySelectorAll('.tagChk').forEach(chk => { chk.checked = tags.includes(chk.value); });
+    };
+    document.getElementById('saveBtn').onclick = () => {
+      const title = document.getElementById('f_title').value.trim();
+      if (!title) { alert('Please enter a title.'); return; }
+      let id = slugify(title);
+      if (recipes.find(r => r.id === id)) id = id + '-' + Date.now();
+      const tags = Array.from(document.querySelectorAll('.tagChk:checked')).map(c => c.value);
+      const rec = {
+        id, title,
+        oven: document.getElementById('f_oven').value.trim(),
+        bakeTime: document.getElementById('f_bake').value.trim(),
+        prepTime: document.getElementById('f_prep').value.trim(),
+        servings: document.getElementById('f_servings').value.trim(),
+        ingredients: document.getElementById('f_ingredients').value.split('\n').map(s => s.trim()).filter(Boolean),
+        instructions: document.getElementById('f_instructions').value.split('\n').map(s => s.trim()).filter(Boolean),
+        tags: tags.length ? tags : autoTag(title),
+        shelf: 'To Make',
+        rating: null,
+        image: null,
+        imageStatus: 'pending',
+        nextPhotoPromptAt: null,
+        dateAdded: new Date().toISOString().slice(0, 10)
+      };
+      recipes.push(rec);
+      save(recipes);
+      view.mode = 'board';
+      render();
+    };
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  render();
+})();
+</script>
+</body>
+</html>
