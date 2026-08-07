@@ -405,7 +405,49 @@
     if (changed) save(recipes);
     return recipes;
   }
-  function save(recipes) { localStorage.setItem(STORAGE_KEY, JSON.stringify(recipes)); }
+  function save(recipes) {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(recipes));
+      return true;
+    } catch (e) {
+      alert("Couldn't save — this device's storage for the journal is full. Replacing or removing a photo on an older recipe will free up room.");
+      return false;
+    }
+  }
+
+  // Phone cameras produce 3-8 MB files, and base64 inflates them by a third, which
+  // overruns the ~5 MB localStorage budget for the whole site on the first photo.
+  // Downscale to a 1600px long edge and re-encode as JPEG before storing.
+  const MAX_IMAGE_DIM = 1600;
+  function readImageDownscaled(file, onDone, onError) {
+    const reader = new FileReader();
+    reader.onerror = () => onError("Couldn't read that file.");
+    reader.onload = ev => {
+      const img = new Image();
+      img.onerror = () => onError("That file doesn't look like an image.");
+      img.onload = () => {
+        const scale = Math.min(1, MAX_IMAGE_DIM / Math.max(img.width, img.height));
+        const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        onDone(canvas.toDataURL('image/jpeg', 0.82));
+      };
+      img.src = ev.target.result;
+    };
+    reader.readAsDataURL(file);
+  }
+
+  // Applies a new photo, rolling the recipe back if the write is rejected so the
+  // view never shows a photo that did not actually persist.
+  function applyPhoto(r, dataUrl, after) {
+    const prev = { image: r.image, imageStatus: r.imageStatus, nextPhotoPromptAt: r.nextPhotoPromptAt };
+    r.image = dataUrl;
+    r.imageStatus = 'has-photo';
+    r.nextPhotoPromptAt = null;
+    if (!save(recipes)) { Object.assign(r, prev); return; }
+    after();
+  }
 
   let recipes = load();
   let view = { mode: 'board', recipeId: null, search: '' };
@@ -550,16 +592,9 @@
     document.getElementById('photoFile').onchange = e => {
       const file = e.target.files[0];
       if (!file) return;
-      const reader = new FileReader();
-      reader.onload = ev => {
-        r.image = ev.target.result;
-        r.imageStatus = 'has-photo';
-        r.nextPhotoPromptAt = null;
-        save(recipes);
-        close();
-        renderDetail();
-      };
-      reader.readAsDataURL(file);
+      readImageDownscaled(file, dataUrl => {
+        applyPhoto(r, dataUrl, () => { close(); renderDetail(); });
+      }, msg => alert(msg));
     };
     document.getElementById('photo30').onclick = () => {
       r.nextPhotoPromptAt = Date.now() + 30 * 60 * 1000;
@@ -599,16 +634,9 @@
     document.getElementById('changePhotoFile').onchange = e => {
       const file = e.target.files[0];
       if (!file) return;
-      const reader = new FileReader();
-      reader.onload = ev => {
-        r.image = ev.target.result;
-        r.imageStatus = 'has-photo';
-        r.nextPhotoPromptAt = null;
-        save(recipes);
-        close();
-        renderDetail();
-      };
-      reader.readAsDataURL(file);
+      readImageDownscaled(file, dataUrl => {
+        applyPhoto(r, dataUrl, () => { close(); renderDetail(); });
+      }, msg => alert(msg));
     };
     document.getElementById('changePhotoCancel').onclick = () => close();
   }
