@@ -56,7 +56,10 @@
   .no-photo-badge { font-size: 0.68rem; color: #8a5a2b; }
 
   /* ---- Detail (tablet card) view ---- */
-  .detail { flex: 1 1 auto; display: flex; flex-direction: column; overflow: auto; }
+  /* .detail is the single scroll container for this view: the bar, photo header,
+     meta bar and content all scroll together rather than the grid scrolling
+     inside a frozen frame. min-height:0 lets it actually overflow as a flex child. */
+  .detail { flex: 1 1 auto; display: flex; flex-direction: column; overflow-y: auto; min-height: 0; }
   .detail-bar { flex: 0 0 auto; padding: 8px 20px; display: flex; gap: 10px; align-items: center; border-bottom: 1px solid var(--border); }
   .card-header {
     position: relative; flex: 0 0 26vh; min-height: 140px;
@@ -69,7 +72,7 @@
   .meta-bar { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: clamp(10px,2vw,28px); padding: clamp(6px,1.4vh,14px) clamp(16px,3vw,40px); font-size: clamp(0.75rem,1.6vh,0.95rem); border-bottom: 1px solid var(--border); }
   .meta-bar b { color: var(--text); }
   .meta-bar .tags { margin-left: auto; font-style: italic; color: var(--muted); }
-  .content-grid { flex: 1 1 auto; display: grid; grid-template-columns: 1fr 1.3fr; gap: clamp(14px,2.5vw,36px); padding: clamp(12px,2vh,22px) clamp(16px,3vw,40px); overflow: auto; min-height: 0; }
+  .content-grid { flex: 0 0 auto; display: grid; grid-template-columns: 1fr 1.3fr; gap: clamp(14px,2.5vw,36px); padding: clamp(12px,2vh,22px) clamp(16px,3vw,40px); }
   .content-grid h2 { font-size: clamp(0.85rem,1.7vh,1.05rem); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 clamp(6px,1vh,10px); border-bottom: 2px solid var(--brown); padding-bottom: 4px; }
   .content-grid ul, .content-grid ol { margin: 0; padding-left: 1.1em; font-size: clamp(0.8rem,1.7vh,1rem); line-height: 1.5; }
   .content-grid ul { list-style: none; padding-left: 0; }
