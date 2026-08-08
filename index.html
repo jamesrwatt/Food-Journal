@@ -79,6 +79,12 @@
   .content-grid li { padding: 3px 0; }
   .content-grid ul li { border-bottom: 1px dotted var(--border); }
 
+  /* ---- Sync status ---- */
+  .sync { font-size: 0.75rem; color: var(--muted); white-space: nowrap; }
+  .sync.online::before { content: "● "; color: #3a5a30; }
+  .sync.connecting::before { content: "● "; color: #b98d5e; }
+  .sync.offline::before { content: "● "; color: #a8452f; }
+
   /* ---- Add form ---- */
   .form-view { flex: 1 1 auto; overflow: auto; padding: 16px 24px; max-width: 700px; }
   .form-view label { display: block; font-size: 0.8rem; color: var(--muted); margin: 12px 0 4px; text-transform: uppercase; letter-spacing: 0.04em; }
@@ -405,14 +411,116 @@
     if (changed) save(recipes);
     return recipes;
   }
-  function save(recipes) {
+  // ---- Shared state via Supabase ---------------------------------------------
+  // The journal is shared across the family: recipe state lives in a Supabase table
+  // and photos in a public bucket, so a shelf move or a new photo on one device shows
+  // up on the others. localStorage stays on as an offline cache so the app keeps
+  // working with no signal in the kitchen and pushes whatever changed on reconnect.
+  const SUPABASE_URL = 'https://uhicczuwqolnowonqwfq.supabase.co';
+  const SUPABASE_KEY = 'sb_publishable_SlLvi4eVDROg3pEfiI1xfg_aUhr6I0u';
+  const PHOTO_BUCKET = 'recipe-photos';
+  const POLL_MS = 30000;
+
+  let cloudState = 'connecting'; // connecting | online | offline
+  let pushTimer = null;
+
+  function sbHeaders(extra) {
+    return Object.assign({ apikey: SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY }, extra || {});
+  }
+  function cloudLabel() {
+    if (cloudState === 'online') return 'Synced';
+    if (cloudState === 'connecting') return 'Connecting…';
+    return 'Offline — saved on this device';
+  }
+  function setCloudState(next) {
+    if (cloudState === next) return;
+    cloudState = next;
+    const el = document.getElementById('syncStatus');
+    if (el) { el.textContent = cloudLabel(); el.className = 'sync ' + cloudState; }
+  }
+
+  function persistLocal(list) {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(recipes));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
       return true;
     } catch (e) {
-      alert("Couldn't save — this device's storage for the journal is full. Replacing or removing a photo on an older recipe will free up room.");
+      alert("Couldn't save on this device — its storage for the journal is full. Replacing or removing a photo on an older recipe will free up room.");
       return false;
     }
+  }
+
+  // Every mutation in the app already funnels through save(), so this is the single
+  // place that also has to tell the server. The push is debounced because a rating
+  // and a shelf move can land back to back.
+  function save(list) {
+    const ok = persistLocal(list);
+    clearTimeout(pushTimer);
+    pushTimer = setTimeout(cloudPush, 400);
+    return ok;
+  }
+
+  function cloudPush() {
+    return fetch(SUPABASE_URL + '/rest/v1/recipes?on_conflict=id', {
+      method: 'POST',
+      headers: sbHeaders({ 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates,return=minimal' }),
+      body: JSON.stringify(recipes.map(r => ({ id: r.id, data: r })))
+    }).then(res => {
+      if (!res.ok) throw new Error('push ' + res.status);
+      setCloudState('online');
+    }).catch(() => setCloudState('offline'));
+  }
+
+  function cloudPull() {
+    return fetch(SUPABASE_URL + '/rest/v1/recipes?select=id,data', { headers: sbHeaders() })
+      .then(res => { if (!res.ok) throw new Error('pull ' + res.status); return res.json(); })
+      .then(rows => {
+        setCloudState('online');
+        const byId = new Map(rows.map(x => [x.id, x.data]));
+        let changed = false;
+        // The server is the shared truth for anything it already knows about.
+        recipes.forEach((r, i) => {
+          const remote = byId.get(r.id);
+          if (remote && JSON.stringify(remote) !== JSON.stringify(r)) { recipes[i] = remote; changed = true; }
+        });
+        // Recipes added on somebody else's device.
+        rows.forEach(x => {
+          if (!recipes.some(r => r.id === x.id)) { recipes.push(x.data); changed = true; }
+        });
+        persistLocal(recipes);
+        // Recipes this build ships that the server has not seen yet — a fresh deploy,
+        // or the very first run against an empty table.
+        if (recipes.some(r => !byId.has(r.id))) cloudPush();
+        // Never yank the form out from under someone mid-typing.
+        if (changed && view.mode !== 'form') render();
+        retryPendingPhotos();
+      })
+      .catch(() => setCloudState('offline'));
+  }
+
+  function uploadPhoto(recipeId, blob) {
+    const path = recipeId + '-' + Date.now() + '.jpg';
+    return fetch(SUPABASE_URL + '/storage/v1/object/' + PHOTO_BUCKET + '/' + path, {
+      method: 'POST', headers: sbHeaders({ 'Content-Type': 'image/jpeg' }), body: blob
+    }).then(res => {
+      if (!res.ok) return res.text().then(t => { throw new Error('upload ' + res.status + ' ' + t); });
+      return SUPABASE_URL + '/storage/v1/object/public/' + PHOTO_BUCKET + '/' + path;
+    });
+  }
+
+  // A photo taken with no signal is held locally as a data URL and uploaded on
+  // reconnect, so it still reaches everyone else instead of being stranded.
+  function retryPendingPhotos() {
+    recipes.filter(r => r.imagePendingUpload && r.image && r.image.indexOf('data:') === 0).forEach(r => {
+      fetch(r.image).then(res => res.blob())
+        .then(blob => uploadPhoto(r.id, blob))
+        .then(url => {
+          r.image = url;
+          r.imagePendingUpload = false;
+          save(recipes);
+          if (view.mode !== 'form') render();
+        })
+        .catch(() => {});
+    });
   }
 
   // Phone cameras produce 3-8 MB files, and base64 inflates them by a third, which
@@ -431,22 +539,36 @@
         const canvas = document.createElement('canvas');
         canvas.width = w; canvas.height = h;
         canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-        onDone(canvas.toDataURL('image/jpeg', 0.82));
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+        canvas.toBlob(blob => {
+          if (!blob) return onError("Couldn't process that image.");
+          onDone({ blob: blob, dataUrl: dataUrl });
+        }, 'image/jpeg', 0.82);
       };
       img.src = ev.target.result;
     };
     reader.readAsDataURL(file);
   }
 
-  // Applies a new photo, rolling the recipe back if the write is rejected so the
-  // view never shows a photo that did not actually persist.
-  function applyPhoto(r, dataUrl, after) {
-    const prev = { image: r.image, imageStatus: r.imageStatus, nextPhotoPromptAt: r.nextPhotoPromptAt };
-    r.image = dataUrl;
-    r.imageStatus = 'has-photo';
-    r.nextPhotoPromptAt = null;
-    if (!save(recipes)) { Object.assign(r, prev); return; }
-    after();
+  // Uploads the photo so everyone sees it, keeping it locally as a data URL if the
+  // upload fails so it is not lost. Rolls the recipe back if even the local write is
+  // rejected, so the view never shows a photo that did not persist anywhere.
+  function applyPhoto(r, shot, after) {
+    const prev = {
+      image: r.image, imageStatus: r.imageStatus,
+      nextPhotoPromptAt: r.nextPhotoPromptAt, imagePendingUpload: r.imagePendingUpload
+    };
+    const commit = (value, pending) => {
+      r.image = value;
+      r.imagePendingUpload = pending;
+      r.imageStatus = 'has-photo';
+      r.nextPhotoPromptAt = null;
+      if (!save(recipes)) { Object.assign(r, prev); return; }
+      after();
+    };
+    uploadPhoto(r.id, shot.blob)
+      .then(url => { setCloudState('online'); commit(url, false); })
+      .catch(() => { setCloudState('offline'); commit(shot.dataUrl, true); });
   }
 
   let recipes = load();
@@ -481,6 +603,7 @@
       <div class="topbar">
         <h1>Food Journal</h1>
         <input type="text" id="searchBox" placeholder="Search by name or tag..." value="${escapeHtml(view.search)}">
+        <span id="syncStatus" class="sync ${cloudState}">${cloudLabel()}</span>
         <button id="addBtn">+ Add Recipe</button>
       </div>
       <div class="board">
@@ -767,6 +890,14 @@
   }
 
   render();
+
+  // Pull once on open, then keep in step: a poll for changes made on other devices,
+  // and an immediate check whenever the tablet comes back to the foreground.
+  cloudPull();
+  setInterval(cloudPull, POLL_MS);
+  window.addEventListener('focus', cloudPull);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) cloudPull(); });
+  window.addEventListener('online', cloudPull);
 })();
 </script>
 </body>
