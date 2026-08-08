@@ -535,6 +535,17 @@
     });
   }
 
+  // capture="environment" makes a phone or tablet open the rear camera directly rather
+  // than the photo library, which is the point of cooking with this thing in hand. It is
+  // set per-click instead of living in the markup because while the attribute is present
+  // some browsers drop the option to pick an already-taken shot, so each entry point asks
+  // for the one it wants. Desktop browsers ignore it and just open a file dialog.
+  function pickImage(input, useCamera) {
+    if (useCamera) input.setAttribute('capture', 'environment');
+    else input.removeAttribute('capture');
+    input.click();
+  }
+
   // Phone cameras produce 3-8 MB files, and base64 inflates them by a third, which
   // overruns the ~5 MB localStorage budget for the whole site on the first photo.
   // Downscale to a 1600px long edge and re-encode as JPEG before storing.
@@ -718,7 +729,8 @@
         <h3>Add a photo?</h3>
         <div>This recipe doesn't have a final photo yet. Upload one now, or remind me later?</div>
         <div class="opts">
-          <button id="photoNow">Now</button>
+          <button id="photoTake">Take Photo</button>
+          <button id="photoChoose">Choose Existing</button>
           <button id="photo30" class="secondary">In 30 min</button>
           <button id="photo60" class="secondary">In 60 min</button>
           <button id="photoSkip" class="secondary">Skip</button>
@@ -727,16 +739,13 @@
       </div>`;
     document.body.appendChild(overlay);
     const close = () => document.body.removeChild(overlay);
-    document.getElementById('photoNow').onclick = () => {
-      const fi = document.getElementById('photoFile');
-      fi.classList.remove('hidden');
-      fi.click();
-    };
+    document.getElementById('photoTake').onclick = () => pickImage(document.getElementById('photoFile'), true);
+    document.getElementById('photoChoose').onclick = () => pickImage(document.getElementById('photoFile'), false);
     document.getElementById('photoFile').onchange = e => {
       const file = e.target.files[0];
       if (!file) return;
-      readImageDownscaled(file, dataUrl => {
-        applyPhoto(r, dataUrl, () => { close(); renderDetail(); });
+      readImageDownscaled(file, shot => {
+        applyPhoto(r, shot, () => { close(); renderDetail(); });
       }, msg => alert(msg));
     };
     document.getElementById('photo30').onclick = () => {
@@ -762,23 +771,23 @@
     overlay.innerHTML = `
       <div class="modal">
         <h3>${hasPhoto ? 'Replace Photo' : 'Add a Photo'}</h3>
-        <div>${hasPhoto ? 'Choose a new photo to replace the current one.' : 'Choose a photo for this recipe.'}</div>
+        <div>${hasPhoto ? 'Take or choose a new photo to replace the current one.' : 'Take a photo of this dish, or choose one you already have.'}</div>
         <div class="opts">
-          <button id="changePhotoChoose">Choose Photo</button>
+          <button id="changePhotoTake">Take Photo</button>
+          <button id="changePhotoChoose">Choose Existing</button>
           <button id="changePhotoCancel" class="secondary">Cancel</button>
         </div>
         <input type="file" id="changePhotoFile" accept="image/*" class="hidden" style="margin-top:10px;">
       </div>`;
     document.body.appendChild(overlay);
     const close = () => document.body.removeChild(overlay);
-    document.getElementById('changePhotoChoose').onclick = () => {
-      document.getElementById('changePhotoFile').click();
-    };
+    document.getElementById('changePhotoTake').onclick = () => pickImage(document.getElementById('changePhotoFile'), true);
+    document.getElementById('changePhotoChoose').onclick = () => pickImage(document.getElementById('changePhotoFile'), false);
     document.getElementById('changePhotoFile').onchange = e => {
       const file = e.target.files[0];
       if (!file) return;
-      readImageDownscaled(file, dataUrl => {
-        applyPhoto(r, dataUrl, () => { close(); renderDetail(); });
+      readImageDownscaled(file, shot => {
+        applyPhoto(r, shot, () => { close(); renderDetail(); });
       }, msg => alert(msg));
     };
     document.getElementById('changePhotoCancel').onclick = () => close();
