@@ -97,6 +97,7 @@
   .srcgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; margin-top: 14px; max-height: 46vh; overflow-y: auto; }
   .srcgrid img { width: 100%; height: 96px; object-fit: cover; border-radius: 6px; border: 2px solid var(--border); cursor: pointer; background: #eee; }
   .srcgrid img:hover { border-color: var(--green); }
+  .srcgrid img.busy { border-color: var(--green); opacity: 0.45; }
 
   /* ---- Sync status ---- */
   .sync { font-size: 0.75rem; color: var(--muted); white-space: nowrap; }
@@ -603,7 +604,12 @@
   // Uploads the photo so everyone sees it, keeping it locally as a data URL if the
   // upload fails so it is not lost. Rolls the recipe back if even the local write is
   // rejected, so the view never shows a photo that did not persist anywhere.
-  function applyPhoto(r, shot, after) {
+  function applyPhoto(rec, shot, after, onFail) {
+    // A sync landing while the dialog is open replaces objects in `recipes` wholesale, so
+    // the one captured when the dialog opened can already be detached from the array.
+    // Writing to that stale copy would save nothing. Re-resolve by id at commit time.
+    const r = recipes.find(x => x.id === rec.id) || rec;
+    const fail = (m) => { if (onFail) onFail(m); };
     const prev = {
       image: r.image, imageStatus: r.imageStatus,
       nextPhotoPromptAt: r.nextPhotoPromptAt, imagePendingUpload: r.imagePendingUpload
@@ -613,7 +619,11 @@
       r.imagePendingUpload = pending;
       r.imageStatus = 'has-photo';
       r.nextPhotoPromptAt = null;
-      if (!save(recipes)) { Object.assign(r, prev); return; }
+      if (!save(recipes)) {
+        Object.assign(r, prev);
+        fail("Couldn't save that photo on this device.");
+        return;
+      }
       after();
     };
     uploadPhoto(r.id, shot.blob)
@@ -794,7 +804,7 @@
       const file = e.target.files[0];
       if (!file) return;
       readImageDownscaled(file, shot => {
-        applyPhoto(r, shot, () => { close(); renderDetail(); });
+        applyPhoto(r, shot, () => { close(); renderDetail(); }, m => alert(m));
       }, msg => alert(msg));
     };
     document.getElementById('photo30').onclick = () => {
@@ -823,35 +833,54 @@
       <div class="modal">
         <h3>Photo from the recipe's page</h3>
         <div>Pick one and the journal will keep its own copy.</div>
+        <div id="srcMsg" class="importmsg">Tap a photo to use it.</div>
         <div class="srcgrid">
           ${r.sourceImages.map((u, i) => `<img src="${escapeHtml(u)}" data-i="${i}" alt="Option ${i + 1}">`).join('')}
         </div>
-        <div id="srcMsg" class="importmsg"></div>
         <div class="opts"><button class="secondary" id="srcCancel">Cancel</button></div>
       </div>`;
     document.body.appendChild(overlay);
     const close = () => document.body.removeChild(overlay);
     overlay.querySelector('#srcCancel').onclick = close;
     const msg = overlay.querySelector('#srcMsg');
-    overlay.querySelectorAll('.srcgrid img').forEach(thumb => {
+    const thumbs = [...overlay.querySelectorAll('.srcgrid img')];
+    let busy = false;
+    const done = (text) => {
+      busy = false;
+      thumbs.forEach(t => t.classList.remove('busy'));
+      msg.className = 'importmsg err';
+      msg.textContent = text;
+    };
+    thumbs.forEach(thumb => {
       thumb.onclick = () => {
-        msg.className = 'importmsg'; msg.textContent = 'Saving a copy…';
+        // Without this, a second tap while the first is still fetching starts a competing
+        // save, and there is nothing on screen saying the first one is running.
+        if (busy) return;
+        busy = true;
+        thumbs.forEach(t => t.classList.toggle('busy', t === thumb));
+        msg.className = 'importmsg';
+        msg.textContent = 'Fetching that photo…';
         callImport({ url: r.sourceImages[+thumb.dataset.i], mode: 'image' })
-          .catch(() => null)
+          .catch(() => { throw new Error('Could not reach the importer — are you online?'); })
           .then(data => {
-            if (!data || !data.ok) {
-              msg.className = 'importmsg err';
-              msg.textContent = (data && data.error) || 'Could not fetch that image.';
-              return;
-            }
-            return fetch(data.dataUrl).then(res => res.blob()).then(blob => {
-              readImageDownscaled(
-                new File([blob], 'source.jpg', { type: blob.type || 'image/jpeg' }),
-                shot => applyPhoto(r, shot, () => { close(); after(); }),
-                m => { msg.className = 'importmsg err'; msg.textContent = m; }
-              );
-            });
-          });
+            if (!data || !data.ok) throw new Error((data && data.error) || 'Could not fetch that image.');
+            return fetch(data.dataUrl).then(res => res.blob());
+          })
+          .then(blob => new Promise((resolve, reject) => {
+            readImageDownscaled(
+              new File([blob], 'source.jpg', { type: blob.type || 'image/jpeg' }),
+              resolve,
+              m => reject(new Error(m))
+            );
+          }))
+          .then(shot => new Promise((resolve, reject) => {
+            msg.textContent = 'Saving…';
+            applyPhoto(r, shot, resolve, m => reject(new Error(m)));
+          }))
+          .then(() => { close(); after(); })
+          // Every step above can reject. Without this the dialog just sat there with no
+          // explanation, which is exactly what it looked like when a step failed.
+          .catch(err => done(err && err.message ? err.message : 'That photo could not be saved.'));
       };
     });
   }
@@ -882,7 +911,7 @@
       const file = e.target.files[0];
       if (!file) return;
       readImageDownscaled(file, shot => {
-        applyPhoto(r, shot, () => { close(); renderDetail(); });
+        applyPhoto(r, shot, () => { close(); renderDetail(); }, m => alert(m));
       }, msg => alert(msg));
     };
     document.getElementById('changePhotoCancel').onclick = () => close();
