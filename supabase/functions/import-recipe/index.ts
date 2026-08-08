@@ -73,7 +73,13 @@ function humanDuration(iso: unknown): string {
   if (typeof iso !== "string") return "";
   const m = iso.match(/^P(?:([\d.]+)D)?(?:T(?:([\d.]+)H)?(?:([\d.]+)M)?)?/);
   if (!m) return "";
-  const [d, h, min] = [m[1], m[2], m[3]].map((x) => (x ? parseFloat(x) : 0));
+  let [d, h, min] = [m[1], m[2], m[3]].map((x) => (x ? parseFloat(x) : 0));
+  // Sites often express long times as raw minutes — altonbrown.com gives an overnight
+  // ice cream as PT540M, which should read "9 hr", not "540 min".
+  h += Math.floor(min / 60);
+  min = Math.round(min % 60);
+  d += Math.floor(h / 24);
+  h = h % 24;
   const parts: string[] = [];
   if (d) parts.push(`${d} day${d > 1 ? "s" : ""}`);
   if (h) parts.push(`${h} hr`);
