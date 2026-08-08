@@ -1,37 +1,26 @@
 // Recipe importer for the Food Journal.
 //
-// A browser cannot fetch a recipe site directly (no CORS headers on those pages), and
+// A browser cannot fetch a recipe site directly (those pages send no CORS headers), and
 // GitHub Pages is static with nowhere to proxy. This edge function is that missing
 // server-side hop: give it a URL and it returns structured recipe fields, or fetches a
-// single image from the page so the app can store its own copy in the bucket instead of
+// single image off the page so the app can store its own copy in the bucket instead of
 // hotlinking someone else's server.
 //
-// Deploy with JWT verification OFF. The publishable key the app carries is not a JWT, so
-// the default verifier would reject every call. Nothing privileged happens here — it
-// reads public pages and returns text — and the guards below are what actually matter.
+// withSupabase handles auth and CORS. auth: "publishable" accepts exactly the key the
+// app already ships in its page, so no JWT juggling is needed and the endpoint is not
+// open to the whole internet. Nothing privileged happens here regardless — it reads
+// public pages and returns text — and the URL guards below are the real protection.
 
-const ALLOWED_ORIGINS = [
-  "https://jamesrwatt.github.io",
-  "http://localhost:8912",
-];
+import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { withSupabase } from "jsr:@supabase/server@^1";
 
-// Sites reject unknown agents: altonbrown.com returns a hard failure without this.
+// Sites reject unknown agents: altonbrown.com refuses outright without this.
 const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36";
 
 const MAX_HTML_BYTES = 5_000_000;
 const MAX_IMAGE_BYTES = 10_000_000;
 const FETCH_TIMEOUT_MS = 15_000;
-
-function corsHeaders(origin: string | null) {
-  const allowed = origin && ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
-  return {
-    "Access-Control-Allow-Origin": allowed,
-    "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Content-Type": "application/json",
-  };
-}
 
 // This endpoint fetches whatever URL it is handed, so it must not become a probe for
 // private networks or non-web schemes.
@@ -79,8 +68,7 @@ async function fetchCapped(url: string, accept: string, cap: number) {
   }
 }
 
-// ISO 8601 durations ("PT2H30M") are what schema.org uses; nobody wants to read that on
-// a recipe card.
+// ISO 8601 durations ("PT2H30M") are what schema.org uses; nobody wants that on a card.
 function humanDuration(iso: unknown): string {
   if (typeof iso !== "string") return "";
   const m = iso.match(/^P(?:([\d.]+)D)?(?:T(?:([\d.]+)H)?(?:([\d.]+)M)?)?/);
@@ -107,7 +95,7 @@ function stripTags(s: unknown): string {
     .trim();
 }
 
-// recipeInstructions comes in three shapes across sites: plain strings, HowToStep
+// recipeInstructions arrives in three shapes across sites: plain strings, HowToStep
 // objects, or HowToSection objects wrapping a nested list.
 function flattenInstructions(node: unknown): string[] {
   const out: string[] = [];
@@ -158,7 +146,7 @@ function collectImages(node: unknown, pageUrl: string): string[] {
     .slice(0, 8);
 }
 
-// JSON-LD nests the Recipe in a few different ways: bare object, top-level array, or
+// JSON-LD hides the Recipe in a few different places: bare object, top-level array, or
 // inside an @graph. Check all of them.
 function findRecipeNode(parsed: unknown): Record<string, unknown> | null {
   const queue: unknown[] = [parsed];
@@ -219,52 +207,44 @@ function parseRecipe(html: string, pageUrl: string) {
   return null;
 }
 
-Deno.serve(async (req) => {
-  const origin = req.headers.get("origin");
-  const headers = corsHeaders(origin);
-  if (req.method === "OPTIONS") return new Response("ok", { headers });
-  if (req.method !== "POST") {
-    return new Response(JSON.stringify({ ok: false, error: "POST only." }), { status: 405, headers });
-  }
-
-  try {
-    const { url, mode } = await req.json();
-    if (typeof url !== "string" || !url.trim()) throw new Error("No URL provided.");
-    const safe = assertSafeUrl(url.trim());
-
-    // Image mode: pull one picture off the page so the app can keep its own copy in the
-    // bucket rather than depending on the source site staying up.
-    if (mode === "image") {
-      const { buf, contentType } = await fetchCapped(safe.toString(), "image/*", MAX_IMAGE_BYTES);
-      if (!contentType.startsWith("image/")) throw new Error("That link is not an image.");
-      let bin = "";
-      for (let i = 0; i < buf.length; i += 0x8000) {
-        bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
-      }
-      return new Response(
-        JSON.stringify({ ok: true, dataUrl: `data:${contentType};base64,${btoa(bin)}` }),
-        { headers },
-      );
+export default {
+  fetch: withSupabase({ auth: "publishable", cors: "default" }, async (req: Request) => {
+    if (req.method !== "POST") {
+      return Response.json({ ok: false, error: "POST only." }, { status: 405 });
     }
+    try {
+      const { url, mode } = await req.json();
+      if (typeof url !== "string" || !url.trim()) throw new Error("No URL provided.");
+      const safe = assertSafeUrl(url.trim());
 
-    const { buf } = await fetchCapped(safe.toString(), "text/html", MAX_HTML_BYTES);
-    const html = new TextDecoder("utf-8").decode(buf);
-    const recipe = parseRecipe(html, safe.toString());
-    if (!recipe) {
-      return new Response(
-        JSON.stringify({
+      // Image mode: pull one picture off the page so the app keeps its own copy in the
+      // bucket rather than depending on the source site staying up.
+      if (mode === "image") {
+        const { buf, contentType } = await fetchCapped(safe.toString(), "image/*", MAX_IMAGE_BYTES);
+        if (!contentType.startsWith("image/")) throw new Error("That link is not an image.");
+        let bin = "";
+        for (let i = 0; i < buf.length; i += 0x8000) {
+          bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+        }
+        return Response.json({ ok: true, dataUrl: `data:${contentType};base64,${btoa(bin)}` });
+      }
+
+      const { buf } = await fetchCapped(safe.toString(), "text/html", MAX_HTML_BYTES);
+      const html = new TextDecoder("utf-8").decode(buf);
+      const recipe = parseRecipe(html, safe.toString());
+      if (!recipe) {
+        return Response.json({
           ok: false,
           error:
             "Couldn't find a recipe on that page. It may not publish structured recipe data — you can still type it in by hand.",
-        }),
-        { headers },
-      );
+        });
+      }
+      return Response.json(recipe);
+    } catch (e) {
+      return Response.json({
+        ok: false,
+        error: e instanceof Error ? e.message : "Import failed.",
+      });
     }
-    return new Response(JSON.stringify(recipe), { headers });
-  } catch (e) {
-    return new Response(
-      JSON.stringify({ ok: false, error: e instanceof Error ? e.message : "Import failed." }),
-      { headers },
-    );
-  }
-});
+  }),
+};
