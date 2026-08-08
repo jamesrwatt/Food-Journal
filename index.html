@@ -499,8 +499,8 @@
         // Recipes this build ships that the server has not seen yet — a fresh deploy,
         // or the very first run against an empty table.
         if (recipes.some(r => !byId.has(r.id))) cloudPush();
-        // Never yank the form out from under someone mid-typing.
-        if (changed && view.mode !== 'form') render();
+        // Never yank the form or a live search out from under someone mid-typing.
+        if (changed) syncRender();
         retryPendingPhotos();
       })
       .catch(() => setCloudState('offline'));
@@ -529,7 +529,7 @@
           r.image = url;
           r.imagePendingUpload = false;
           save(recipes);
-          if (view.mode !== 'form') render();
+          syncRender();
         })
         .catch(() => {});
     });
@@ -609,19 +609,26 @@
 
   const app = document.getElementById('app');
 
+  // Re-render triggered by a background sync rather than by the user. If they are
+  // mid-search, redraw only the shelves so the focused input survives.
+  function syncRender() {
+    if (view.mode === 'form') return;
+    const box = document.getElementById('searchBox');
+    if (view.mode === 'board' && box && document.activeElement === box) renderShelves();
+    else render();
+  }
+
   function render() {
     if (view.mode === 'board') renderBoard();
     else if (view.mode === 'detail') renderDetail();
     else if (view.mode === 'form') renderForm();
   }
 
+  // The top bar is rendered once and left alone; only the shelves below it are redrawn
+  // as you type. Rebuilding the whole board on each keystroke replaced the very input
+  // being typed into, which dropped focus after one letter — on a phone that closes the
+  // keyboard, and on a desktop it means clicking back into the box for every character.
   function renderBoard() {
-    const shelves = ['To Make', 'Making', 'Made'];
-    const q = view.search.toLowerCase();
-    const filtered = recipes.filter(r =>
-      !q || r.title.toLowerCase().includes(q) || r.tags.some(t => t.toLowerCase().includes(q))
-    );
-
     app.innerHTML = `
       <div class="topbar">
         <h1>Food Journal</h1>
@@ -629,22 +636,31 @@
         <span id="syncStatus" class="sync ${cloudState}">${cloudLabel()}</span>
         <button id="addBtn">+ Add Recipe</button>
       </div>
-      <div class="board">
-        ${shelves.map(shelf => {
-          const items = filtered.filter(r => r.shelf === shelf);
-          return `
-            <div class="column">
-              <div class="column-head">${shelf} (${items.length})</div>
-              <div class="column-body">
-                ${items.map(r => cardHtml(r)).join('') || '<div class="rmeta">No recipes here yet.</div>'}
-              </div>
-            </div>`;
-        }).join('')}
-      </div>
+      <div class="board" id="boardCols"></div>
     `;
-
-    document.getElementById('searchBox').oninput = e => { view.search = e.target.value; renderBoard(); };
+    document.getElementById('searchBox').oninput = e => { view.search = e.target.value; renderShelves(); };
     document.getElementById('addBtn').onclick = () => { view.mode = 'form'; render(); };
+    renderShelves();
+  }
+
+  function renderShelves() {
+    const shelves = ['To Make', 'Making', 'Made'];
+    const q = view.search.toLowerCase();
+    const filtered = recipes.filter(r =>
+      !q || r.title.toLowerCase().includes(q) || r.tags.some(t => t.toLowerCase().includes(q))
+    );
+    const cols = document.getElementById('boardCols');
+    if (!cols) return;
+    cols.innerHTML = shelves.map(shelf => {
+      const items = filtered.filter(r => r.shelf === shelf);
+      return `
+        <div class="column">
+          <div class="column-head">${shelf} (${items.length})</div>
+          <div class="column-body">
+            ${items.map(r => cardHtml(r)).join('') || '<div class="rmeta">No recipes here yet.</div>'}
+          </div>
+        </div>`;
+    }).join('');
     recipes.forEach(r => {
       const t = document.getElementById('title-' + r.id);
       if (t) t.onclick = () => openRecipe(r.id);
@@ -675,12 +691,12 @@
     const r = recipes.find(x => x.id === id);
     if (!r) return;
     if (newShelf === 'Made' && r.rating == null) {
-      showRatingModal(r, () => { r.shelf = 'Made'; save(recipes); renderBoard(); });
+      showRatingModal(r, () => { r.shelf = 'Made'; save(recipes); renderShelves(); });
       return;
     }
     r.shelf = newShelf;
     save(recipes);
-    renderBoard();
+    renderShelves();
   }
 
   function showRatingModal(r, onDone) {
