@@ -498,6 +498,20 @@
         setCloudState('online');
         const byId = new Map(rows.map(x => [x.id, x.data]));
         let changed = false;
+
+        // Deleting a row outright cannot work: every client treats a recipe the server
+        // lacks as one to upload, so the next sync from any device that still holds it
+        // puts it straight back. A recipe is removed by keeping its row and flagging it
+        // deleted — a tombstone the server can actually state, and clients can act on.
+        const tombstoned = new Set(
+          rows.filter(x => x.data && x.data.deleted).map(x => x.id)
+        );
+        if (tombstoned.size) {
+          const before = recipes.length;
+          recipes = recipes.filter(r => !tombstoned.has(r.id));
+          if (recipes.length !== before) changed = true;
+        }
+
         // The server is the shared truth for anything it already knows about.
         recipes.forEach((r, i) => {
           const remote = byId.get(r.id);
@@ -505,6 +519,7 @@
         });
         // Recipes added on somebody else's device.
         rows.forEach(x => {
+          if (x.data && x.data.deleted) return;
           if (!recipes.some(r => r.id === x.id)) { recipes.push(x.data); changed = true; }
         });
         persistLocal(recipes);
