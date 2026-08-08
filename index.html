@@ -1106,6 +1106,7 @@
           }
           const setIf = (id, v) => { if (v) document.getElementById(id).value = v; };
           setIf('f_title', data.title);
+          setIf('f_oven', data.oven);
           setIf('f_bake', data.bakeTime);
           setIf('f_prep', data.prepTime);
           setIf('f_servings', data.servings);
@@ -1116,8 +1117,13 @@
           document.querySelectorAll('.tagChk').forEach(chk => { chk.checked = tags.includes(chk.value); });
           pendingImport = { source: data.source || url, images: data.images || [] };
           const shots = pendingImport.images.length;
+          // A prose-parsed page had no structured recipe data, so this is a best guess
+          // read off the article text and is worth a closer look before saving.
+          const guessed = data.parsedFrom === 'prose';
           msg.className = 'importmsg ok';
-          msg.textContent = `Imported ${ing.length} ingredients and ${steps.length} steps — check it over, then save.`
+          msg.textContent = (guessed
+            ? `That page has no recipe data, so this is a best guess from the article — read it over carefully. Got ${ing.length} ingredients and ${steps.length} steps.`
+            : `Imported ${ing.length} ingredients and ${steps.length} steps — check it over, then save.`)
             + (shots ? ` Found ${shots} photo${shots > 1 ? 's' : ''} on the page; you can pick one after saving.` : '');
         });
     };

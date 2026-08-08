@@ -173,6 +173,151 @@ function findRecipeNode(parsed: unknown): Record<string, unknown> | null {
   return null;
 }
 
+// ---- Prose fallback -------------------------------------------------------------
+// Plenty of good cooking sites publish no structured data at all — thefrenchcookingacademy
+// writes the method as an article. For those, reconstruct the recipe from the page text.
+// This is a best guess by nature, so the result is flagged and the app tells you to check
+// it rather than pretending it is as reliable as JSON-LD.
+
+// Like stripTags, but keeps block boundaries as newlines so list and paragraph structure
+// survives — that structure is most of the signal for telling ingredients from prose.
+function htmlToLines(html: string): string[] {
+  const withBreaks = html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<nav[\s\S]*?<\/nav>/gi, " ")
+    .replace(/<footer[\s\S]*?<\/footer>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|li|h[1-6]|tr|section|article)\s*>/gi, "\n")
+    .replace(/<li[^>]*>/gi, "\n");
+  return stripTags(withBreaks.replace(/\n/g, ""))
+    .split("")
+    .map((l) => l.trim())
+    .filter(Boolean);
+}
+
+const UNIT = /\b(g|kg|ml|l|tbsp|tbs|tsp|teaspoons?|tablespoons?|cups?|oz|lb|lbs|pounds?|ounces?|grams?|cloves?|pinch|handful|sprigs?|slices?|sticks?|cans?|packets?)\b/i;
+const QTY_START = /^(\d|[¼½¾⅓⅔⅛]|a\s|an\s|one\s|two\s|three\s|four\s|half\s|juice\s|zest\s|salt|pepper|enough\s)/i;
+
+function looksLikeIngredient(line: string): boolean {
+  if (line.length > 160) return false;
+  if (/[.!?]\s+\S/.test(line)) return false; // more than one sentence reads like prose
+  return QTY_START.test(line) || UNIT.test(line);
+}
+
+// "For the sauce" style headings become the same section markers used elsewhere.
+function sectionHeading(line: string): string | null {
+  if (line.length > 60) return null;
+  const m = line.match(/^(?:for\s+the\s+|for\s+)(.+?)[:：]?$/i);
+  if (!m || /\d/.test(line)) return null;
+  return `— ${m[0].replace(/[:：]$/, "").toUpperCase()} —`;
+}
+
+function timeAfter(text: string, label: RegExp): string {
+  const m = text.match(label);
+  if (!m || m.index === undefined) return "";
+  const tail = text.slice(m.index + m[0].length, m.index + m[0].length + 40);
+  const d = tail.match(
+    /^\s*(\d+\s*(?:h(?:ours?|rs?)?|min(?:utes?|s)?)(?:\s*\d+\s*min(?:utes?|s)?)?)/i,
+  );
+  return d ? d[1].trim() : "";
+}
+
+function findHeading(lines: string[], re: RegExp, from = 0): number {
+  for (let i = from; i < lines.length; i++) {
+    if (lines[i].length <= 40 && re.test(lines[i])) return i;
+  }
+  return -1;
+}
+
+function metaContent(html: string, prop: string): string {
+  const re = new RegExp(
+    `<meta[^>]+(?:property|name)=["']${prop}["'][^>]*content=["']([^"']+)["']`,
+    "i",
+  );
+  const m = html.match(re) || html.match(
+    new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]*(?:property|name)=["']${prop}["']`, "i"),
+  );
+  return m ? stripTags(m[1]) : "";
+}
+
+function parseProse(html: string, pageUrl: string) {
+  const lines = htmlToLines(html);
+  if (lines.length < 10) return null;
+
+  const ingStart = findHeading(lines, /^ingredients?\b/i);
+  const methodStart = findHeading(
+    lines,
+    /^(method|instructions?|directions?|preparation|steps|to\s+make)\b/i,
+    ingStart >= 0 ? ingStart + 1 : 0,
+  );
+  if (ingStart < 0 || methodStart < 0 || methodStart <= ingStart) return null;
+
+  const ingredients: string[] = [];
+  for (const line of lines.slice(ingStart + 1, methodStart)) {
+    const heading = sectionHeading(line);
+    if (heading) { ingredients.push(heading); continue; }
+    if (looksLikeIngredient(line)) ingredients.push(line);
+  }
+
+  // Steps run until the page stops looking like instructions — a short heading that is
+  // not a step marker is usually the start of comments, related posts or a newsletter box.
+  const instructions: string[] = [];
+  for (const line of lines.slice(methodStart + 1)) {
+    if (/^(related|you\s+may\s+also|comments?|leave\s+a\s+(reply|comment)|share\s+this|subscribe|print\s+recipe|nutrition|about\s+the\s+author)\b/i.test(line)) break;
+    if (line.length < 25) {
+      const heading = sectionHeading(line);
+      if (heading) instructions.push(heading);
+      continue;
+    }
+    // The tag cloud and category links that trail an article are long enough to pass the
+    // length test but carry no sentence punctuation. Real steps are sentences.
+    if (instructions.length >= 2 && !/[.!?]/.test(line)) break;
+    instructions.push(line.replace(/^(?:step\s*)?\d+[).:]?\s*/i, ""));
+  }
+
+  if (ingredients.length < 2 || instructions.length < 2) return null;
+
+  const text = lines.join(" ");
+  const serves = text.match(/\b(?:serves|servings?|yield)\b[:\s]*([\d]+(?:\s*[-–]\s*\d+)?)/i);
+  // Match a duration immediately after the label rather than "everything up to a full
+  // stop": these labels usually sit in a pipe-separated strip with no punctuation, so a
+  // loose match swallows whatever text follows it.
+  const prep = timeAfter(text, /\bprep(?:aration)?\s*time\b[:\s]*/i);
+  const cook = timeAfter(text, /\b(?:cook|cooking|baking|bake)\s*time\b[:\s]*/i);
+  const oven = text.match(/\b(\d{3})\s*°?\s*(?:°|deg|degrees)?\s*(?:F|C)\b/i);
+
+  const title = metaContent(html, "og:title") ||
+    stripTags((html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i) || [])[1] || "") ||
+    stripTags((html.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || "");
+
+  const images: string[] = [];
+  const og = metaContent(html, "og:image");
+  if (og) images.push(og);
+  for (const m of html.matchAll(/<img[^>]+src=["']([^"']+)["']/gi)) {
+    if (images.length >= 8) break;
+    const src = m[1];
+    if (/\.(svg|gif)(\?|$)/i.test(src)) continue;
+    if (/logo|icon|avatar|sprite|badge|pixel/i.test(src)) continue;
+    images.push(src);
+  }
+
+  return {
+    ok: true,
+    parsedFrom: "prose",
+    title: title.replace(/\s*[|—–-]\s*[^|—–-]*$/, "").trim() || title,
+    ingredients,
+    instructions,
+    prepTime: prep ? prep[1].trim() : "",
+    bakeTime: cook ? cook[1].trim() : "",
+    servings: serves ? serves[1].trim() : "",
+    oven: oven ? oven[0].trim() : "",
+    images: collectImages(images, pageUrl),
+    source: pageUrl,
+  };
+}
+
 function parseRecipe(html: string, pageUrl: string) {
   const blocks = [...html.matchAll(
     /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi,
