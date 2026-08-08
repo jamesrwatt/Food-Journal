@@ -509,8 +509,11 @@
 
   // A photo taken with no signal is held locally as a data URL and uploaded on
   // reconnect, so it still reaches everyone else instead of being stranded.
+  // The test is the data: prefix rather than the imagePendingUpload flag, because
+  // photos taken before this sync landed predate the flag entirely: keying off it
+  // would strand them as ~300 KB of base64 in the row, never reaching the bucket.
   function retryPendingPhotos() {
-    recipes.filter(r => r.imagePendingUpload && r.image && r.image.indexOf('data:') === 0).forEach(r => {
+    recipes.filter(r => r.image && r.image.indexOf('data:') === 0).forEach(r => {
       fetch(r.image).then(res => res.blob())
         .then(blob => uploadPhoto(r.id, blob))
         .then(url => {
