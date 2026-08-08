@@ -309,8 +309,10 @@ function parseProse(html: string, pageUrl: string) {
     title: title.replace(/\s*[|—–-]\s*[^|—–-]*$/, "").trim() || title,
     ingredients,
     instructions,
-    prepTime: prep ? prep[1].trim() : "",
-    bakeTime: cook ? cook[1].trim() : "",
+    // timeAfter returns the duration as a string, not a match array — indexing it here
+    // silently produced its second character ("30 MIN" became "0").
+    prepTime: prep,
+    bakeTime: cook,
     servings: serves ? serves[1].trim() : "",
     oven: oven ? oven[0].trim() : "",
     images: collectImages(images, pageUrl),
