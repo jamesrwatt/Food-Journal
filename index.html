@@ -61,12 +61,20 @@
      inside a frozen frame. min-height:0 lets it actually overflow as a flex child. */
   .detail { flex: 1 1 auto; display: flex; flex-direction: column; overflow-y: auto; min-height: 0; }
   .detail-bar { flex: 0 0 auto; padding: 8px 20px; display: flex; gap: 10px; align-items: center; border-bottom: 1px solid var(--border); }
+  /* Title band. The photo used to be a cover background on this element, which
+     cropped it and stretched it across the full screen width; it now renders as a
+     real image below, at its own aspect ratio. */
   .card-header {
-    position: relative; flex: 0 0 26vh; min-height: 140px;
-    background: linear-gradient(135deg, #d9c7a3, #b98d5e); background-size: cover; background-position: center;
-    display: flex; align-items: flex-end; padding: clamp(10px,2vh,22px) clamp(16px,3vw,40px);
+    position: relative; flex: 0 0 auto;
+    background: linear-gradient(135deg, #d9c7a3, #b98d5e);
+    display: flex; align-items: flex-end; padding: clamp(12px,2.2vh,24px) clamp(16px,3vw,40px);
   }
-  .card-header::after { content:""; position:absolute; left:0; right:0; bottom:-1px; height:40%; background: linear-gradient(to top, rgba(250,247,242,0.95), rgba(250,247,242,0)); }
+  .photo-wrap { flex: 0 0 auto; padding: clamp(12px,2vh,18px) clamp(16px,3vw,40px) 0; }
+  .recipe-photo {
+    display: block; max-width: min(100%, 360px); max-height: 40vh;
+    width: auto; height: auto; object-fit: contain;
+    border-radius: 8px; border: 1px solid var(--border);
+  }
   .card-header .title { position: relative; z-index: 1; font-size: clamp(1.3rem,3.2vh,2.1rem); font-weight: 700; color: var(--green); margin: 0; line-height: 1.1; }
   .photo-pending-badge { position: absolute; top: 10px; right: 14px; font-size: 0.7rem; background: rgba(255,255,255,0.9); padding: 3px 9px; border-radius: 10px; color: #8a5a2b; z-index: 1; }
   .meta-bar { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: clamp(10px,2vw,28px); padding: clamp(6px,1.4vh,14px) clamp(16px,3vw,40px); font-size: clamp(0.75rem,1.6vh,0.95rem); border-bottom: 1px solid var(--border); }
@@ -102,6 +110,7 @@
   .modal h3 { margin-top: 0; color: var(--green); }
   .modal .opts { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 14px; }
   .grid10 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-top: 14px; }
+  .grid10 button.current { outline: 2px solid var(--green); outline-offset: 1px; font-weight: 700; }
   .grid10 button { background: #fff; color: var(--green); border: 1px solid var(--green); }
   .grid10 button:hover { background: var(--green); color: #fff; }
   .hidden { display: none !important; }
@@ -669,20 +678,28 @@
     overlay.innerHTML = `
       <div class="modal">
         <h3>Rate "${escapeHtml(r.title)}"</h3>
-        <div>How would you rate it, 1-10?</div>
+        <div>${r.rating != null
+          ? `Made it again? You gave it <b>${r.rating}/10</b> last time.`
+          : 'How would you rate it, 1-10?'}</div>
         <div class="grid10">
-          ${[1,2,3,4,5,6,7,8,9,10].map(n => `<button data-n="${n}">${n}</button>`).join('')}
+          ${[1,2,3,4,5,6,7,8,9,10].map(n =>
+            `<button data-n="${n}"${n === r.rating ? ' class="current"' : ''}>${n}</button>`).join('')}
         </div>
+        <div class="opts"><button class="secondary" id="rateCancel">Cancel</button></div>
       </div>`;
     document.body.appendChild(overlay);
+    const close = () => document.body.removeChild(overlay);
     overlay.querySelectorAll('button[data-n]').forEach(btn => {
       btn.onclick = () => {
         r.rating = parseInt(btn.dataset.n, 10);
         save(recipes);
-        document.body.removeChild(overlay);
+        close();
         onDone();
       };
     });
+    // Cancel still runs onDone so backing out of the prompt shown when a recipe moves
+    // to Made does not silently strand the shelf change; the rating just stays as it was.
+    overlay.querySelector('#rateCancel').onclick = () => { close(); onDone(); };
   }
 
   function openRecipe(id) {
@@ -771,23 +788,25 @@
     const r = recipes.find(x => x.id === view.recipeId);
     if (!r) { view.mode = 'board'; return render(); }
 
-    const headerStyle = r.imageStatus === 'has-photo'
-      ? `style="background-image:url('${r.image}');"`
-      : '';
     const photoBadge = r.imageStatus === 'has-photo' ? '' :
       `<span class="photo-pending-badge">${r.imageStatus === 'ai-pending' ? 'Photo pending (AI gen not connected)' : 'Photo pending'}</span>`;
+    const photoBlock = r.imageStatus === 'has-photo' && r.image
+      ? `<div class="photo-wrap"><img class="recipe-photo" src="${escapeHtml(r.image)}" alt="${escapeHtml(r.title)}"></div>`
+      : '';
 
     app.innerHTML = `
       <div class="detail">
         <div class="detail-bar">
           <button class="secondary" id="backBtn">&larr; Board</button>
-          <span style="color:var(--muted); font-size:0.85rem;">Shelf: <b>${r.shelf}</b>${r.rating != null ? ` &middot; Rating: <b>${r.rating}/10</b>` : ''}</span>
+          <span style="color:var(--muted); font-size:0.85rem;">Shelf: <b>${r.shelf}</b></span>
+          <button class="secondary" id="rateBtn">${r.rating != null ? `Rating: ${r.rating}/10 &middot; Update` : 'Add Rating'}</button>
           <button class="secondary" id="changePhotoBtn" style="margin-left:auto;">${r.imageStatus === 'has-photo' ? 'Replace Photo' : 'Change Photo'}</button>
         </div>
-        <div class="card-header" ${headerStyle}>
+        <div class="card-header">
           ${photoBadge}
           <p class="title">${escapeHtml(r.title)}</p>
         </div>
+        ${photoBlock}
         <div class="meta-bar">
           ${r.oven ? `<span><b>Oven:</b> ${escapeHtml(r.oven)}</span>` : ''}
           ${r.bakeTime ? `<span><b>Bake Time:</b> ${escapeHtml(r.bakeTime)}</span>` : ''}
@@ -808,6 +827,7 @@
       </div>`;
 
     document.getElementById('backBtn').onclick = () => { view.mode = 'board'; render(); };
+    document.getElementById('rateBtn').onclick = () => showRatingModal(r, () => renderDetail());
     document.getElementById('changePhotoBtn').onclick = () => openChangePhotoModal(r);
     maybeShowPhotoPrompt(r);
   }
