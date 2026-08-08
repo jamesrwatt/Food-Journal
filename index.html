@@ -87,6 +87,17 @@
   .content-grid li { padding: 3px 0; }
   .content-grid ul li { border-bottom: 1px dotted var(--border); }
 
+  /* ---- URL import ---- */
+  .importrow { display: flex; gap: 8px; align-items: center; }
+  .importrow input { flex: 1 1 auto; margin: 0; }
+  .importrow button { flex: 0 0 auto; }
+  .importmsg { font-size: 0.8rem; color: var(--muted); margin-top: 6px; min-height: 1em; }
+  .importmsg.err { color: #a8452f; }
+  .importmsg.ok { color: var(--green); }
+  .srcgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; margin-top: 14px; max-height: 46vh; overflow-y: auto; }
+  .srcgrid img { width: 100%; height: 96px; object-fit: cover; border-radius: 6px; border: 2px solid var(--border); cursor: pointer; background: #eee; }
+  .srcgrid img:hover { border-color: var(--green); }
+
   /* ---- Sync status ---- */
   .sync { font-size: 0.75rem; color: var(--muted); white-space: nowrap; }
   .sync.online::before { content: "● "; color: #3a5a30; }
@@ -506,6 +517,22 @@
       .catch(() => setCloudState('offline'));
   }
 
+  // The importer runs as an edge function because a browser cannot fetch a recipe site
+  // itself (those pages send no CORS headers) and Pages is static with nowhere to proxy.
+  const IMPORT_FN = SUPABASE_URL + '/functions/v1/import-recipe';
+  function callImport(payload) {
+    return fetch(IMPORT_FN, {
+      method: 'POST',
+      headers: sbHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(payload)
+    }).then(res => res.json().catch(() => ({
+      ok: false,
+      error: res.status === 404
+        ? 'The importer is not set up yet — the import-recipe function needs deploying.'
+        : `The importer returned an error (${res.status}).`
+    })));
+  }
+
   function uploadPhoto(recipeId, blob) {
     const path = recipeId + '-' + Date.now() + '.jpg';
     return fetch(SUPABASE_URL + '/storage/v1/object/' + PHOTO_BUCKET + '/' + path, {
@@ -595,6 +622,9 @@
   }
 
   let recipes = load();
+  // Carries what the importer found from the moment Import is pressed until Save, since
+  // the source URL and its candidate photos are not editable form fields.
+  let pendingImport = { source: '', images: [] };
   let view = { mode: 'board', recipeId: null, search: '' };
 
   function autoTag(text) {
@@ -747,6 +777,7 @@
         <div class="opts">
           <button id="photoTake">Take Photo</button>
           <button id="photoChoose">Choose Existing</button>
+          ${r.sourceImages && r.sourceImages.length ? `<button id="photoSource">From Recipe's Page</button>` : ''}
           <button id="photo30" class="secondary">In 30 min</button>
           <button id="photo60" class="secondary">In 60 min</button>
           <button id="photoSkip" class="secondary">Skip</button>
@@ -757,6 +788,8 @@
     const close = () => document.body.removeChild(overlay);
     document.getElementById('photoTake').onclick = () => pickImage(document.getElementById('photoFile'), true);
     document.getElementById('photoChoose').onclick = () => pickImage(document.getElementById('photoFile'), false);
+    const promptSrcBtn = document.getElementById('photoSource');
+    if (promptSrcBtn) promptSrcBtn.onclick = () => { close(); openSourceImagePicker(r, () => renderDetail()); };
     document.getElementById('photoFile').onchange = e => {
       const file = e.target.files[0];
       if (!file) return;
@@ -780,6 +813,49 @@
     };
   }
 
+  // For an imported recipe, offer the photos that were on the source page. The chosen one
+  // is fetched through the edge function and re-uploaded to our own bucket rather than
+  // hotlinked, so it keeps working if the source site changes or disappears.
+  function openSourceImagePicker(r, after) {
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay';
+    overlay.innerHTML = `
+      <div class="modal">
+        <h3>Photo from the recipe's page</h3>
+        <div>Pick one and the journal will keep its own copy.</div>
+        <div class="srcgrid">
+          ${r.sourceImages.map((u, i) => `<img src="${escapeHtml(u)}" data-i="${i}" alt="Option ${i + 1}">`).join('')}
+        </div>
+        <div id="srcMsg" class="importmsg"></div>
+        <div class="opts"><button class="secondary" id="srcCancel">Cancel</button></div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => document.body.removeChild(overlay);
+    overlay.querySelector('#srcCancel').onclick = close;
+    const msg = overlay.querySelector('#srcMsg');
+    overlay.querySelectorAll('.srcgrid img').forEach(thumb => {
+      thumb.onclick = () => {
+        msg.className = 'importmsg'; msg.textContent = 'Saving a copy…';
+        callImport({ url: r.sourceImages[+thumb.dataset.i], mode: 'image' })
+          .catch(() => null)
+          .then(data => {
+            if (!data || !data.ok) {
+              msg.className = 'importmsg err';
+              msg.textContent = (data && data.error) || 'Could not fetch that image.';
+              return;
+            }
+            return fetch(data.dataUrl).then(res => res.blob()).then(blob => {
+              readImageDownscaled(
+                new File([blob], 'source.jpg', { type: blob.type || 'image/jpeg' }),
+                shot => applyPhoto(r, shot, () => { close(); after(); }),
+                m => { msg.className = 'importmsg err'; msg.textContent = m; }
+              );
+            });
+          });
+      };
+    });
+  }
+
   function openChangePhotoModal(r) {
     const hasPhoto = r.imageStatus === 'has-photo';
     const overlay = document.createElement('div');
@@ -791,6 +867,7 @@
         <div class="opts">
           <button id="changePhotoTake">Take Photo</button>
           <button id="changePhotoChoose">Choose Existing</button>
+          ${r.sourceImages && r.sourceImages.length ? `<button id="changePhotoSource">From Recipe's Page</button>` : ''}
           <button id="changePhotoCancel" class="secondary">Cancel</button>
         </div>
         <input type="file" id="changePhotoFile" accept="image/*" class="hidden" style="margin-top:10px;">
@@ -799,6 +876,8 @@
     const close = () => document.body.removeChild(overlay);
     document.getElementById('changePhotoTake').onclick = () => pickImage(document.getElementById('changePhotoFile'), true);
     document.getElementById('changePhotoChoose').onclick = () => pickImage(document.getElementById('changePhotoFile'), false);
+    const srcBtn = document.getElementById('changePhotoSource');
+    if (srcBtn) srcBtn.onclick = () => { close(); openSourceImagePicker(r, () => renderDetail()); };
     document.getElementById('changePhotoFile').onchange = e => {
       const file = e.target.files[0];
       if (!file) return;
@@ -858,6 +937,7 @@
   }
 
   function renderForm() {
+    pendingImport = { source: '', images: [] };
     app.innerHTML = `
       <div class="topbar">
         <button class="secondary" id="cancelBtn">&larr; Board</button>
@@ -865,9 +945,15 @@
       </div>
       <div class="form-view">
         <div class="hint">
-          Type a recipe in directly below. For a screenshot or a URL, send it to Claude in chat
-          and ask to add it to the journal &mdash; Claude will read it and drop it in here for you.
+          Paste a recipe link below to fill this in automatically, or just type it out.
+          For a screenshot or a handwritten card, send it to Claude in chat instead.
         </div>
+        <label>Import from a link</label>
+        <div class="importrow">
+          <input type="url" id="f_url" placeholder="https://... paste a recipe page">
+          <button class="secondary" id="importBtn">Import</button>
+        </div>
+        <div id="importMsg" class="importmsg"></div>
         <label>Title</label>
         <input type="text" id="f_title" placeholder="e.g. Goose's Chocolate Chip Cookies">
         <div class="row3">
@@ -894,6 +980,40 @@
       </div>`;
 
     document.getElementById('cancelBtn').onclick = () => { view.mode = 'board'; render(); };
+    document.getElementById('importBtn').onclick = (e) => {
+      e.preventDefault();
+      const url = document.getElementById('f_url').value.trim();
+      const msg = document.getElementById('importMsg');
+      const btn = document.getElementById('importBtn');
+      if (!url) { msg.className = 'importmsg err'; msg.textContent = 'Paste a recipe link first.'; return; }
+      btn.disabled = true; btn.textContent = 'Importing…';
+      msg.className = 'importmsg'; msg.textContent = 'Reading the page…';
+      callImport({ url })
+        .catch(() => ({ ok: false, error: 'Could not reach the importer — are you online?' }))
+        .then(data => {
+          btn.disabled = false; btn.textContent = 'Import';
+          if (!data || !data.ok) {
+            msg.className = 'importmsg err';
+            msg.textContent = (data && data.error) || 'Import failed.';
+            return;
+          }
+          const setIf = (id, v) => { if (v) document.getElementById(id).value = v; };
+          setIf('f_title', data.title);
+          setIf('f_bake', data.bakeTime);
+          setIf('f_prep', data.prepTime);
+          setIf('f_servings', data.servings);
+          const ing = data.ingredients || [], steps = data.instructions || [];
+          if (ing.length) document.getElementById('f_ingredients').value = ing.join('\n');
+          if (steps.length) document.getElementById('f_instructions').value = steps.join('\n');
+          const tags = autoTag([data.title, ing.join(' '), steps.join(' ')].join(' '));
+          document.querySelectorAll('.tagChk').forEach(chk => { chk.checked = tags.includes(chk.value); });
+          pendingImport = { source: data.source || url, images: data.images || [] };
+          const shots = pendingImport.images.length;
+          msg.className = 'importmsg ok';
+          msg.textContent = `Imported ${ing.length} ingredients and ${steps.length} steps — check it over, then save.`
+            + (shots ? ` Found ${shots} photo${shots > 1 ? 's' : ''} on the page; you can pick one after saving.` : '');
+        });
+    };
     document.getElementById('autoTagBtn').onclick = (e) => {
       e.preventDefault();
       const text = [
@@ -926,6 +1046,9 @@
         nextPhotoPromptAt: null,
         dateAdded: new Date().toISOString().slice(0, 10)
       };
+      if (pendingImport.source) rec.source = pendingImport.source;
+      if (pendingImport.images.length) rec.sourceImages = pendingImport.images;
+      pendingImport = { source: '', images: [] };
       recipes.push(rec);
       save(recipes);
       view.mode = 'board';
