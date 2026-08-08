@@ -345,6 +345,7 @@ function parseRecipe(html: string, pageUrl: string) {
 
     return {
       ok: true,
+      parsedFrom: "jsonld",
       title: stripTags(node.name),
       ingredients,
       instructions,
@@ -382,7 +383,9 @@ export default {
 
       const { buf } = await fetchCapped(safe.toString(), "text/html", MAX_HTML_BYTES);
       const html = new TextDecoder("utf-8").decode(buf);
-      const recipe = parseRecipe(html, safe.toString());
+      // Structured data first; fall back to reading the article prose only when a page
+      // publishes none, since JSON-LD is exact and the fallback is a best guess.
+      const recipe = parseRecipe(html, safe.toString()) || parseProse(html, safe.toString());
       if (!recipe) {
         return Response.json({
           ok: false,
