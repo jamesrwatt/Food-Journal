@@ -490,7 +490,19 @@
     }).then(res => {
       if (!res.ok) throw new Error('push ' + res.status);
       setCloudState('online');
-    }).catch(() => setCloudState('offline'));
+      return true;
+    }).catch(() => { setCloudState('offline'); return false; });
+  }
+
+  // Asks the cleanup function to collect photos no live recipe references. Named objects
+  // skip its "leave recent uploads alone" rule, which is how a photo belonging to a recipe
+  // deleted seconds ago gets collected instead of waiting for the next sweep.
+  function sweepPhotos(alsoDelete) {
+    return fetch(SUPABASE_URL + '/functions/v1/cleanup-photos', {
+      method: 'POST',
+      headers: sbHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(alsoDelete && alsoDelete.length ? { alsoDelete: alsoDelete } : {})
+    }).then(res => res.json()).catch(() => null);
   }
 
   function cloudPull() {
@@ -798,11 +810,20 @@
   // made offline still reaches everyone else on reconnect.
   function deleteRecipe(rec) {
     const r = recipes.find(x => x.id === rec.id) || rec;
+    // Note the photo before tombstoning, so it can be named to the sweep afterwards.
+    const photo = (typeof r.image === 'string' && r.image.indexOf('/storage/v1/object/public/') > 0)
+      ? decodeURIComponent(r.image.split('/').pop().split('?')[0])
+      : null;
     r.deleted = true;
     r.deletedAt = new Date().toISOString();
-    save(recipes);
+    persistLocal(recipes);
     view.mode = 'board';
     render();
+    // Push the tombstone before sweeping. Until the server has it the recipe still counts
+    // as live, its photo still looks in use, and the sweep would skip the very thing it
+    // was called for. If the push fails there is nothing to clean up yet either.
+    clearTimeout(pushTimer);
+    cloudPush().then(ok => { if (ok) sweepPhotos(photo ? [photo] : []); });
   }
 
   function confirmDeleteModal(r) {

@@ -47,11 +47,19 @@ export default {
     }
     try {
       let dryRun = false;
+      let minAgeMs = 10 * 60 * 1000;
+      let alsoDelete: string[] = [];
       try {
         const body = await req.json();
         dryRun = body?.dryRun === true;
+        if (typeof body?.minAgeMinutes === "number" && body.minAgeMinutes >= 0) {
+          minAgeMs = body.minAgeMinutes * 60 * 1000;
+        }
+        if (Array.isArray(body?.alsoDelete)) {
+          alsoDelete = body.alsoDelete.filter((n: unknown) => typeof n === "string" && n);
+        }
       } catch {
-        // no body is fine — treat as a real run
+        // no body is fine — treat as a real run with the defaults
       }
 
       const url = projectUrl();
@@ -65,14 +73,20 @@ export default {
         body: JSON.stringify({ prefix: "", limit: 1000 }),
       });
       if (!listRes.ok) throw new Error(`Could not list the bucket (${listRes.status}).`);
-      const objects: Array<{ name: string }> = await listRes.json();
+      const objects: Array<{ name: string; created_at?: string; updated_at?: string }> =
+        await listRes.json();
 
-      // Every image any recipe points at.
+      // Every image a *live* recipe points at.
       const rowsRes = await fetch(`${url}/rest/v1/recipes?select=data`, { headers: h });
       if (!rowsRes.ok) throw new Error(`Could not read recipes (${rowsRes.status}).`);
-      const rows: Array<{ data: { image?: string | null } }> = await rowsRes.json();
+      const rows: Array<{ data: { image?: string | null; deleted?: boolean } }> =
+        await rowsRes.json();
       const inUse = new Set<string>();
       for (const row of rows) {
+        // A deleted recipe keeps its row and its image field as a tombstone, but nothing
+        // shows that photo any more. Counting it as in-use is what would make cleanup a
+        // no-op for exactly the case it is most needed: the photo of a deleted recipe.
+        if (row?.data?.deleted) continue;
         const img = row?.data?.image;
         if (typeof img === "string" && img) {
           // Compare on the object name, since the row stores a full public URL.
@@ -89,10 +103,25 @@ export default {
         );
       }
 
-      // Anything Supabase itself put there is not ours to remove.
+      // A photo uploaded moments ago may simply not have had its recipe row pushed yet;
+      // on someone else's phone that gap can be seconds on poor wifi. Sweeping it would
+      // delete a picture that was just taken, so recent objects are left alone — unless a
+      // caller names one explicitly, which the app does after a delete, when it already
+      // knows for certain that recipe is gone.
+      //
+      // Either way the in-use check comes first, so a named object belonging to a live
+      // recipe is still refused. The caller can only ever hurry along a real orphan.
+      const now = Date.now();
+      const named = new Set(alsoDelete);
       const orphans = objects
-        .map((o) => o.name)
-        .filter((n) => n && !n.startsWith(".") && !inUse.has(n));
+        .filter((o) => {
+          if (!o.name || o.name.startsWith(".")) return false;
+          if (inUse.has(o.name)) return false;
+          if (named.has(o.name)) return true;
+          const t = Date.parse(o.created_at || o.updated_at || "");
+          return !Number.isFinite(t) || now - t >= minAgeMs;
+        })
+        .map((o) => o.name);
 
       if (dryRun) {
         return Response.json({
