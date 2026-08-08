@@ -123,6 +123,8 @@
   .modal .opts { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 14px; }
   .grid10 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-top: 14px; }
   .grid10 button.current { outline: 2px solid var(--green); outline-offset: 1px; font-weight: 700; }
+  button.danger { background: #a8452f; border-color: #a8452f; color: #fff; }
+  button.danger.secondary { background: transparent; color: #a8452f; border-color: #d8b6ad; }
   .grid10 button { background: #fff; color: var(--green); border: 1px solid var(--green); }
   .grid10 button:hover { background: var(--green); color: #fff; }
   .hidden { display: none !important; }
@@ -512,8 +514,11 @@
           if (recipes.length !== before) changed = true;
         }
 
-        // The server is the shared truth for anything it already knows about.
+        // The server is the shared truth for anything it already knows about — except a
+        // recipe deleted here whose tombstone has not reached the server yet. Taking the
+        // server's copy would undo the deletion, and it would come back on the next render.
         recipes.forEach((r, i) => {
+          if (r.deleted) return;
           const remote = byId.get(r.id);
           if (remote && JSON.stringify(remote) !== JSON.stringify(r)) { recipes[i] = remote; changed = true; }
         });
@@ -701,8 +706,10 @@
   function renderShelves() {
     const shelves = ['To Make', 'Making', 'Made'];
     const q = view.search.toLowerCase();
+    // Tombstoned recipes linger in the array until the push lands, so keep them off screen.
     const filtered = recipes.filter(r =>
-      !q || r.title.toLowerCase().includes(q) || r.tags.some(t => t.toLowerCase().includes(q))
+      !r.deleted &&
+      (!q || r.title.toLowerCase().includes(q) || r.tags.some(t => t.toLowerCase().includes(q)))
     );
     const cols = document.getElementById('boardCols');
     if (!cols) return;
@@ -782,6 +789,38 @@
     // Cancel still runs onDone so backing out of the prompt shown when a recipe moves
     // to Made does not silently strand the shelf change; the rating just stays as it was.
     overlay.querySelector('#rateCancel').onclick = () => { close(); onDone(); };
+  }
+
+  // Removing a recipe is a tombstone, not a row delete — see cloudPull for why deleting
+  // the row just brings it back. The recipe stays in `recipes` carrying the flag so the
+  // next push takes the tombstone with it; the board filters it out meanwhile, and once
+  // the server has it the pull drops it from the array for good. That also means a delete
+  // made offline still reaches everyone else on reconnect.
+  function deleteRecipe(rec) {
+    const r = recipes.find(x => x.id === rec.id) || rec;
+    r.deleted = true;
+    r.deletedAt = new Date().toISOString();
+    save(recipes);
+    view.mode = 'board';
+    render();
+  }
+
+  function confirmDeleteModal(r) {
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay';
+    overlay.innerHTML = `
+      <div class="modal">
+        <h3>Delete "${escapeHtml(r.title)}"?</h3>
+        <div>It will disappear from the journal on every device. Its photo stays in storage until the next cleanup.</div>
+        <div class="opts">
+          <button class="danger" id="delYes">Delete</button>
+          <button class="secondary" id="delNo">Cancel</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => document.body.removeChild(overlay);
+    overlay.querySelector('#delNo').onclick = close;
+    overlay.querySelector('#delYes').onclick = () => { close(); deleteRecipe(r); };
   }
 
   function openRecipe(id) {
@@ -934,7 +973,8 @@
 
   function renderDetail() {
     const r = recipes.find(x => x.id === view.recipeId);
-    if (!r) { view.mode = 'board'; return render(); }
+    // Also bounce if it was deleted on another device while this one had it open.
+    if (!r || r.deleted) { view.mode = 'board'; return render(); }
 
     const photoBadge = r.imageStatus === 'has-photo' ? '' :
       `<span class="photo-pending-badge">${r.imageStatus === 'ai-pending' ? 'Photo pending (AI gen not connected)' : 'Photo pending'}</span>`;
@@ -949,6 +989,7 @@
           <span style="color:var(--muted); font-size:0.85rem;">Shelf: <b>${r.shelf}</b></span>
           <button class="secondary" id="rateBtn">${r.rating != null ? `Rating: ${r.rating}/10 &middot; Update` : 'Add Rating'}</button>
           <button class="secondary" id="changePhotoBtn" style="margin-left:auto;">${r.imageStatus === 'has-photo' ? 'Replace Photo' : 'Change Photo'}</button>
+          <button class="secondary danger" id="deleteBtn">Delete</button>
         </div>
         <div class="card-header">
           ${photoBadge}
@@ -976,6 +1017,7 @@
 
     document.getElementById('backBtn').onclick = () => { view.mode = 'board'; render(); };
     document.getElementById('rateBtn').onclick = () => showRatingModal(r, () => renderDetail());
+    document.getElementById('deleteBtn').onclick = () => confirmDeleteModal(r);
     document.getElementById('changePhotoBtn').onclick = () => openChangePhotoModal(r);
     maybeShowPhotoPrompt(r);
   }
