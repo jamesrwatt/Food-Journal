@@ -1318,11 +1318,21 @@
   // user can long-press and Paste into fires an ordinary paste event, which works
   // everywhere. Both end at the same place: a File through the normal downscale and
   // upload path.
+  // Resolves once the page has focus again, or after the timeout either way.
+  function waitForFocus(timeoutMs) {
+    if (document.hasFocus()) return Promise.resolve();
+    return new Promise(resolve => {
+      const done = () => { window.removeEventListener('focus', done); clearTimeout(timer); resolve(); };
+      const timer = setTimeout(done, timeoutMs);
+      window.addEventListener('focus', done);
+    });
+  }
+
   function readClipboardImage() {
     if (!navigator.clipboard || !navigator.clipboard.read) {
       return Promise.reject(new Error('unsupported'));
     }
-    return navigator.clipboard.read().then(items => {
+    const attempt = () => navigator.clipboard.read().then(items => {
       for (const item of items) {
         const type = (item.types || []).find(t => t.indexOf('image/') === 0);
         if (type) {
@@ -1331,6 +1341,15 @@
         }
       }
       throw new Error('no-image');
+    });
+    // The browser asks for clipboard permission asynchronously, and its prompt takes
+    // focus off the page — but clipboard.read() requires a focused document, so the call
+    // that triggered the prompt rejects even when permission is then granted. Granting it
+    // and getting an error is exactly that. Wait for focus to come back and try once more,
+    // which is the point at which permission has actually been decided.
+    return attempt().catch(err => {
+      if (err && err.message === 'no-image') throw err;
+      return waitForFocus(3000).then(attempt);
     });
   }
 
@@ -1354,7 +1373,7 @@
         <div>Copy an image from a web page, then paste it here.</div>
         <div class="opts"><button id="pasteTry">Paste from clipboard</button></div>
         <div id="pasteBox" class="pastebox" contenteditable="true" role="textbox"
-             aria-label="Paste target">Or long-press here and choose Paste</div>
+             aria-label="Paste target">Or tap here and press Ctrl+V — on a tablet, long-press and choose Paste</div>
         <div id="pasteMsg" class="importmsg"></div>
         <div class="opts"><button class="secondary" id="pasteCancel">Cancel</button></div>
       </div>`;
@@ -1376,16 +1395,15 @@
     overlay.querySelector('#pasteCancel').onclick = close;
     overlay.querySelector('#pasteTry').onclick = () => {
       msg.className = 'importmsg';
-      msg.textContent = 'Reading the clipboard…';
+      msg.textContent = 'Reading the clipboard… if you are asked for permission, allow it and this carries on.';
       readClipboardImage()
         .then(use)
         .catch(err => {
           msg.className = 'importmsg err';
           msg.textContent = err && err.message === 'no-image'
             ? "There's no image on the clipboard — copy one first, then try again."
-            : "This browser wouldn't let the app read the clipboard. Long-press the box below and choose Paste instead.";
-          const box = overlay.querySelector('#pasteBox');
-          box.focus();
+            : "This browser wouldn't let the app read the clipboard. Use the box below instead: tap it, then press Ctrl+V, or long-press and choose Paste.";
+          overlay.querySelector('#pasteBox').focus();
         });
     };
     overlay.querySelector('#pasteBox').addEventListener('paste', e => {
