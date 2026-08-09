@@ -53,6 +53,19 @@
   .pill { display: inline-block; background: #eee0c8; color: var(--green); border-radius: 10px; padding: 1px 8px; font-size: 0.7rem; margin-right: 4px; }
   .rcard .ractions { display: flex; gap: 6px; margin-top: 6px; align-items: center; }
   .rcard select { font-family: inherit; font-size: 0.75rem; padding: 2px; }
+
+  /* Three shelves side by side needs width that a phone in portrait does not have: at
+     375px each column is about 100px, leaving recipe titles in a 54px box. Below 600px
+     the shelves stack full width and the board scrolls as one, so a title gets the whole
+     screen. The recipe view itself is fine as it is and is left alone. */
+  @media (max-width: 600px) {
+    .board { flex-direction: column; overflow-y: auto; overflow-x: hidden; gap: 10px; padding: 10px 12px; }
+    .column { flex: 0 0 auto; }
+    .column-body { overflow-y: visible; min-height: 0; padding: 8px; }
+    .topbar { flex-wrap: wrap; row-gap: 6px; }
+    .topbar h1 { flex: 0 0 auto; }
+    .topbar input[type="text"] { flex: 1 1 100%; order: 3; }
+  }
   .no-photo-badge { font-size: 0.68rem; color: #8a5a2b; }
 
   /* ---- Detail (tablet card) view ---- */
@@ -572,19 +585,11 @@
   // ratings. Shelf and rating are deliberately NOT written into the shared row, or one
   // person moving a recipe would move it for everybody.
   function cloudPush() {
-    const content = recipes.map(r => {
-      const c = contentOf(r);
-      // Transition shim. Devices still running the pre-profiles build read shelf and
-      // rating off the shared row, and would show nothing at all if those vanished. Keep
-      // them in step from the admin's journal until everyone has reloaded, then drop this
-      // along with the columns. Only the admin writes them, so a kid moving a shelf on
-      // their own profile cannot reach an old device.
-      if (isAdmin()) {
-        c.shelf = r.shelf || 'To Make';
-        c.rating = (typeof r.rating === 'number') ? r.rating : null;
-      }
-      return { id: r.id, data: c };
-    });
+    // Shelf and rating are per person and live only in profile_recipes. They were also
+    // mirrored onto the shared row while devices on the pre-profiles build still read
+    // them from there; every device has since reloaded, so that duplicate is gone and
+    // there is one place each fact lives.
+    const content = recipes.map(r => ({ id: r.id, data: contentOf(r) }));
     const jobs = [];
     if (contentReconciled) jobs.push(upsert('recipes', content, 'id'));
     if (profilesAvailable && profile) {
