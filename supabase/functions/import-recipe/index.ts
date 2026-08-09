@@ -54,11 +54,30 @@ async function fetchCapped(url: string, accept: string, cap: number) {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(url, {
-      headers: { "User-Agent": BROWSER_UA, Accept: accept, "Accept-Language": "en-US,en;q=0.9" },
-      redirect: "follow",
-      signal: ctl.signal,
-    });
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        headers: { "User-Agent": BROWSER_UA, Accept: accept, "Accept-Language": "en-US,en;q=0.9" },
+        redirect: "follow",
+        signal: ctl.signal,
+      });
+    } catch (e) {
+      // Bot protection often drops the connection rather than answering, so a network
+      // error here usually means refused rather than genuinely offline.
+      if (ctl.signal.aborted) throw new Error("That site took too long to respond.");
+      throw new Error(
+        "Couldn't reach that site — it may be blocking automated requests. Send the link to Claude in chat and it can read the page and add the recipe for you.",
+      );
+    }
+    // Some sites sit behind bot protection that refuses anything without a real browser's
+    // TLS fingerprint, which no combination of headers can satisfy. Say so plainly rather
+    // than reporting a bare status code, because the useful next step is a person, not a
+    // retry — and chasing this with ever more browser-like requests is a losing arms race.
+    if (res.status === 403 || res.status === 401 || res.status === 429) {
+      throw new Error(
+        "That site blocks automated requests, so it can't be imported here. Send the link to Claude in chat and it can read the page and add the recipe for you.",
+      );
+    }
     if (!res.ok) throw new Error(`The site returned ${res.status}.`);
     const buf = new Uint8Array(await res.arrayBuffer());
     if (buf.byteLength > cap) throw new Error("That page or image is too large to import.");
