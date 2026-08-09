@@ -87,6 +87,8 @@
   .content-grid li { padding: 3px 0; }
   .content-grid ul li { border-bottom: 1px dotted var(--border); }
 
+  .notes { font-size: clamp(0.8rem,1.7vh,1rem); line-height: 1.5; white-space: pre-wrap; color: var(--text); }
+
   /* ---- URL import ---- */
   .importrow { display: flex; gap: 8px; align-items: center; }
   .importrow input { flex: 1 1 auto; margin: 0; }
@@ -1061,7 +1063,8 @@
           <button class="secondary" id="backBtn">&larr; Board</button>
           <span style="color:var(--muted); font-size:0.85rem;">Shelf: <b>${r.shelf}</b></span>
           <button class="secondary" id="rateBtn">${r.rating != null ? `Rating: ${r.rating}/10 &middot; Update` : 'Add Rating'}</button>
-          <button class="secondary" id="changePhotoBtn" style="margin-left:auto;">${r.imageStatus === 'has-photo' ? 'Replace Photo' : 'Change Photo'}</button>
+          <button class="secondary" id="editBtn" style="margin-left:auto;">Edit</button>
+          <button class="secondary" id="changePhotoBtn">${r.imageStatus === 'has-photo' ? 'Replace Photo' : 'Change Photo'}</button>
           <button class="secondary danger" id="deleteBtn">Delete</button>
         </div>
         <div class="card-header">
@@ -1084,6 +1087,7 @@
           <div class="col">
             <h2>Instructions</h2>
             <ol>${r.instructions.map(i => `<li>${escapeHtml(i)}</li>`).join('')}</ol>
+            ${r.notes ? `<h2 style="margin-top:18px;">Notes</h2><div class="notes">${escapeHtml(r.notes)}</div>` : ''}
           </div>
         </div>
       </div>`;
@@ -1091,18 +1095,28 @@
     document.getElementById('backBtn').onclick = () => { view.mode = 'board'; render(); };
     document.getElementById('rateBtn').onclick = () => showRatingModal(r, () => renderDetail());
     document.getElementById('deleteBtn').onclick = () => confirmDeleteModal(r);
+    document.getElementById('editBtn').onclick = () => { view.mode = 'form'; view.editId = r.id; render(); };
     document.getElementById('changePhotoBtn').onclick = () => openChangePhotoModal(r);
     maybeShowPhotoPrompt(r);
   }
 
   function renderForm() {
     pendingImport = { source: '', images: [] };
+    // view.editId set means this is an edit of an existing recipe rather than a new one.
+    const editing = view.editId ? recipes.find(r => r.id === view.editId) : null;
+    if (view.editId && !editing) { view.mode = 'board'; view.editId = null; return render(); }
+    const val = (v) => escapeHtml(v || '');
     app.innerHTML = `
       <div class="topbar">
-        <button class="secondary" id="cancelBtn">&larr; Board</button>
-        <h1>Add a Recipe</h1>
+        <button class="secondary" id="cancelBtn">&larr; ${editing ? 'Back' : 'Board'}</button>
+        <h1>${editing ? 'Edit Recipe' : 'Add a Recipe'}</h1>
       </div>
       <div class="form-view">
+        ${editing ? `
+        <div class="hint">
+          Changes here are to the recipe itself, so everyone sees them. Shelf and rating
+          stay yours.
+        </div>` : `
         <div class="hint">
           Paste a recipe link below to fill this in automatically, or just type it out.
           For a screenshot or a handwritten card, send it to Claude in chat instead.
@@ -1112,34 +1126,40 @@
           <input type="url" id="f_url" placeholder="https://... paste a recipe page">
           <button class="secondary" id="importBtn">Import</button>
         </div>
-        <div id="importMsg" class="importmsg"></div>
+        <div id="importMsg" class="importmsg"></div>`}
         <label>Title</label>
-        <input type="text" id="f_title" placeholder="e.g. Goose's Chocolate Chip Cookies">
+        <input type="text" id="f_title" placeholder="e.g. Goose's Chocolate Chip Cookies" value="${val(editing && editing.title)}">
         <div class="row3">
-          <div><label>Oven</label><input type="text" id="f_oven" placeholder="350°F"></div>
-          <div><label>Bake Time</label><input type="text" id="f_bake" placeholder="10-12 min"></div>
-          <div><label>Prep Time</label><input type="text" id="f_prep" placeholder="15 min"></div>
+          <div><label>Oven</label><input type="text" id="f_oven" placeholder="350°F" value="${val(editing && editing.oven)}"></div>
+          <div><label>Bake Time</label><input type="text" id="f_bake" placeholder="10-12 min" value="${val(editing && editing.bakeTime)}"></div>
+          <div><label>Prep Time</label><input type="text" id="f_prep" placeholder="15 min" value="${val(editing && editing.prepTime)}"></div>
         </div>
         <label>Servings</label>
-        <input type="text" id="f_servings" placeholder="e.g. 4">
+        <input type="text" id="f_servings" placeholder="e.g. 4" value="${val(editing && editing.servings)}">
         <label>Ingredients (one per line)</label>
-        <textarea id="f_ingredients" placeholder="1 cup flour&#10;2 eggs&#10;..."></textarea>
+        <textarea id="f_ingredients" placeholder="1 cup flour&#10;2 eggs&#10;...">${val(editing && editing.ingredients ? editing.ingredients.join('\n') : '')}</textarea>
         <label>Instructions (one step per line)</label>
-        <textarea id="f_instructions" placeholder="Preheat oven...&#10;Mix ingredients...&#10;..."></textarea>
+        <textarea id="f_instructions" placeholder="Preheat oven...&#10;Mix ingredients...&#10;...">${val(editing && editing.instructions ? editing.instructions.join('\n') : '')}</textarea>
+        <label>Notes</label>
+        <textarea id="f_notes" placeholder="What you served it with, what you'd change next time...">${val(editing && editing.notes)}</textarea>
         <label>Tags <button class="secondary" id="autoTagBtn" style="font-size:0.7rem; padding:3px 8px;">Auto-tag</button></label>
         <div class="tagbox">
-          <label><input type="checkbox" value="Appetizer" class="tagChk"> Appetizer</label>
-          <label><input type="checkbox" value="Main Dish" class="tagChk"> Main Dish</label>
-          <label><input type="checkbox" value="Side" class="tagChk"> Side</label>
-          <label><input type="checkbox" value="Dessert" class="tagChk"> Dessert</label>
+          ${['Appetizer','Main Dish','Side','Dessert'].map(t =>
+            `<label><input type="checkbox" value="${t}" class="tagChk"${editing && editing.tags && editing.tags.indexOf(t) >= 0 ? ' checked' : ''}> ${t}</label>`).join('')}
         </div>
         <div style="margin-top:18px;">
-          <button id="saveBtn">Save Recipe</button>
+          <button id="saveBtn">${editing ? 'Save Changes' : 'Save Recipe'}</button>
         </div>
       </div>`;
 
-    document.getElementById('cancelBtn').onclick = () => { view.mode = 'board'; render(); };
-    document.getElementById('importBtn').onclick = (e) => {
+    document.getElementById('cancelBtn').onclick = () => {
+      // Editing came from the recipe, so go back there rather than all the way out.
+      if (view.editId) { view.mode = 'detail'; view.recipeId = view.editId; view.editId = null; }
+      else view.mode = 'board';
+      render();
+    };
+    // The import row only exists when adding; editing an existing recipe has no use for it.
+    if (document.getElementById('importBtn')) document.getElementById('importBtn').onclick = (e) => {
       e.preventDefault();
       const url = document.getElementById('f_url').value.trim();
       const msg = document.getElementById('importMsg');
@@ -1192,25 +1212,44 @@
     document.getElementById('saveBtn').onclick = () => {
       const title = document.getElementById('f_title').value.trim();
       if (!title) { alert('Please enter a title.'); return; }
-      let id = slugify(title);
-      if (recipes.find(r => r.id === id)) id = id + '-' + Date.now();
       const tags = Array.from(document.querySelectorAll('.tagChk:checked')).map(c => c.value);
-      const rec = {
-        id, title,
+      const fields = {
+        title: title,
         oven: document.getElementById('f_oven').value.trim(),
         bakeTime: document.getElementById('f_bake').value.trim(),
         prepTime: document.getElementById('f_prep').value.trim(),
         servings: document.getElementById('f_servings').value.trim(),
         ingredients: document.getElementById('f_ingredients').value.split('\n').map(s => s.trim()).filter(Boolean),
         instructions: document.getElementById('f_instructions').value.split('\n').map(s => s.trim()).filter(Boolean),
-        tags: tags.length ? tags : autoTag(title),
+        notes: document.getElementById('f_notes').value.trim(),
+        tags: tags.length ? tags : autoTag(title)
+      };
+
+      if (editing) {
+        // Assign onto the existing recipe rather than replacing it, so everything the
+        // form does not cover — the photo, where it came from, the shelf, the rating,
+        // the date it was added — survives an edit untouched. The id never changes
+        // either, or the per-profile rows and the photo would lose their recipe.
+        const live = recipes.find(r => r.id === editing.id) || editing;
+        Object.assign(live, fields);
+        save(recipes);
+        view.mode = 'detail';
+        view.recipeId = live.id;
+        view.editId = null;
+        render();
+        return;
+      }
+
+      let id = slugify(title);
+      if (recipes.find(r => r.id === id)) id = id + '-' + Date.now();
+      const rec = Object.assign({ id: id }, fields, {
         shelf: 'To Make',
         rating: null,
         image: null,
         imageStatus: 'pending',
         nextPhotoPromptAt: null,
         dateAdded: new Date().toISOString().slice(0, 10)
-      };
+      });
       if (pendingImport.source) rec.source = pendingImport.source;
       if (pendingImport.images.length) rec.sourceImages = pendingImport.images;
       pendingImport = { source: '', images: [] };
