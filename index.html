@@ -101,6 +101,10 @@
   .srcgrid img:hover { border-color: var(--green); }
   .srcgrid img.busy { border-color: var(--green); opacity: 0.45; }
 
+  /* ---- Profiles ---- */
+  .whogrid { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+  .whobtn { font-size: 1rem; padding: 12px 20px; }
+
   /* ---- Sync status ---- */
   .sync { font-size: 0.75rem; color: var(--muted); white-space: nowrap; }
   .sync.online::before { content: "● "; color: #3a5a30; }
@@ -463,38 +467,59 @@
     return s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
   }
 
-  function load() {
-    let recipes = [];
-    try { recipes = JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch (e) { recipes = []; }
-    SEED_RECIPES.forEach(seed => {
-      if (!recipes.find(r => r.id === seed.id)) recipes.push(seed);
-    });
-    // Deliberately does NOT save. Seeding is a local starting point, not news for the
-    // server: SEED_RECIPES carry image: null, shelf: 'To Make' and rating: null, so
-    // pushing them before a pull has merged the real state overwrites everyone's photos,
-    // shelves and ratings with blanks. Any device with empty storage — a new phone, a
-    // private window, evicted storage — took that path. cloudPull() pushes once it has
-    // actually reconciled with the server.
-    return recipes;
-  }
-  // ---- Shared state via Supabase ---------------------------------------------
-  // The journal is shared across the family: recipe state lives in a Supabase table
-  // and photos in a public bucket, so a shelf move or a new photo on one device shows
-  // up on the others. localStorage stays on as an offline cache so the app keeps
-  // working with no signal in the kitchen and pushes whatever changed on reconnect.
+  // ---- Profiles and shared state via Supabase ---------------------------------
+  // A recipe is two things at once. Its text and its photo are facts about the dish, so
+  // they are shared: one copy in `recipes`, last write wins. Which shelf it sits on and
+  // what you scored it are opinions, so they belong to one person and live in
+  // `profile_recipes` keyed by (profile, recipe). That split is why one person's 9/10 and
+  // another's 6/10 can coexist, and why hiding a recipe costs nothing extra.
+  //
+  // In memory the two halves are merged back into one object per recipe, so the rendering
+  // code never has to care. contentOf() splits them apart again on the way out.
   const SUPABASE_URL = 'https://uhicczuwqolnowonqwfq.supabase.co';
   const SUPABASE_KEY = 'sb_publishable_SlLvi4eVDROg3pEfiI1xfg_aUhr6I0u';
   const PHOTO_BUCKET = 'recipe-photos';
   const POLL_MS = 30000;
+  const PROFILE_KEY = 'foodJournalProfile';
+  const PROFILE_FIELDS = ['shelf', 'rating', 'hidden', 'nextPhotoPromptAt'];
 
+  let profile = null;            // { id, name, isAdmin } — whose journal this device shows
+  let allProfiles = [];
+  let profilesAvailable = true;  // false drops back to the old single shared journal
   let cloudState = 'connecting'; // connecting | online | offline
   let pushTimer = null;
 
-  // Nothing is written to the server until a pull has succeeded in this session. Before
-  // that the in-memory list is only what this build ships plus whatever the cache held,
-  // and pushing it would overwrite server data this device has never seen. The device
-  // with the least information must never be the one that wins.
+  // Shared recipe content is only ever pushed after a pull has succeeded in this session.
+  // Before that, the in-memory list is whatever this build ships plus whatever the cache
+  // held, and SEED_RECIPES carry image: null — so pushing it would blank the photo on
+  // every recipe the server knows better than we do. Per-profile rows are exempt: they
+  // are this profile's own and cannot clobber anybody's shared data.
   let contentReconciled = false;
+
+  // Cached per profile, so switching people on one device does not show the previous
+  // person's shelves for a moment before the pull lands.
+  function cacheKey() {
+    return profile ? STORAGE_KEY + ':' + profile.id : STORAGE_KEY;
+  }
+
+  function contentOf(r) {
+    const out = {};
+    Object.keys(r).forEach(k => { if (PROFILE_FIELDS.indexOf(k) < 0) out[k] = r[k]; });
+    return out;
+  }
+
+  function load() {
+    let list = [];
+    try { list = JSON.parse(localStorage.getItem(cacheKey())) || []; } catch (e) { list = []; }
+    // Recipes shipped with the build belong to whoever runs the family cookbook. A new
+    // profile starts empty and fills up as recipes are sent to it.
+    if (!profilesAvailable || !profile || profile.isAdmin) {
+      SEED_RECIPES.forEach(seed => {
+        if (!list.find(r => r.id === seed.id)) list.push(Object.assign({ hidden: false }, seed));
+      });
+    }
+    return list;
+  }
 
   function sbHeaders(extra) {
     return Object.assign({ apikey: SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY }, extra || {});
@@ -513,7 +538,7 @@
 
   function persistLocal(list) {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+      localStorage.setItem(cacheKey(), JSON.stringify(list));
       return true;
     } catch (e) {
       alert("Couldn't save on this device — its storage for the journal is full. Replacing or removing a photo on an older recipe will free up room.");
@@ -531,17 +556,50 @@
     return ok;
   }
 
-  function cloudPush() {
-    if (!contentReconciled) return Promise.resolve(false);
-    return fetch(SUPABASE_URL + '/rest/v1/recipes?on_conflict=id', {
+  function upsert(table, rows, conflict) {
+    if (!rows.length) return Promise.resolve(true);
+    return fetch(SUPABASE_URL + '/rest/v1/' + table + '?on_conflict=' + conflict, {
       method: 'POST',
       headers: sbHeaders({ 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates,return=minimal' }),
-      body: JSON.stringify(recipes.map(r => ({ id: r.id, data: r })))
+      body: JSON.stringify(rows)
     }).then(res => {
-      if (!res.ok) throw new Error('push ' + res.status);
-      setCloudState('online');
+      if (!res.ok) throw new Error(table + ' push ' + res.status);
       return true;
-    }).catch(() => { setCloudState('offline'); return false; });
+    });
+  }
+
+  // Writes both halves: the shared recipe text and photo, and this profile's shelves and
+  // ratings. Shelf and rating are deliberately NOT written into the shared row, or one
+  // person moving a recipe would move it for everybody.
+  function cloudPush() {
+    const content = recipes.map(r => {
+      const c = contentOf(r);
+      // Transition shim. Devices still running the pre-profiles build read shelf and
+      // rating off the shared row, and would show nothing at all if those vanished. Keep
+      // them in step from the admin's journal until everyone has reloaded, then drop this
+      // along with the columns. Only the admin writes them, so a kid moving a shelf on
+      // their own profile cannot reach an old device.
+      if (isAdmin()) {
+        c.shelf = r.shelf || 'To Make';
+        c.rating = (typeof r.rating === 'number') ? r.rating : null;
+      }
+      return { id: r.id, data: c };
+    });
+    const jobs = [];
+    if (contentReconciled) jobs.push(upsert('recipes', content, 'id'));
+    if (profilesAvailable && profile) {
+      jobs.push(upsert('profile_recipes', recipes.map(r => ({
+        profile_id: profile.id,
+        recipe_id: r.id,
+        shelf: r.shelf || 'To Make',
+        rating: (typeof r.rating === 'number') ? r.rating : null,
+        hidden: !!r.hidden,
+        next_photo_prompt_at: (typeof r.nextPhotoPromptAt === 'number') ? r.nextPhotoPromptAt : null
+      })), 'profile_id,recipe_id'));
+    }
+    return Promise.all(jobs)
+      .then(() => { setCloudState('online'); return true; })
+      .catch(() => { setCloudState('offline'); return false; });
   }
 
   // Asks the cleanup function to collect photos no live recipe references. Named objects
@@ -556,25 +614,53 @@
   }
 
   function cloudPull() {
-    return fetch(SUPABASE_URL + '/rest/v1/recipes?select=id,data', { headers: sbHeaders() })
-      .then(res => { if (!res.ok) throw new Error('pull ' + res.status); return res.json(); })
-      .then(rows => {
+    // Nobody has said who they are yet, so there is no journal to sync into.
+    if (profilesAvailable && !profile) return Promise.resolve();
+    const jobs = [
+      fetch(SUPABASE_URL + '/rest/v1/recipes?select=id,data', { headers: sbHeaders() })
+        .then(res => { if (!res.ok) throw new Error('pull ' + res.status); return res.json(); })
+    ];
+    if (profilesAvailable && profile) {
+      jobs.push(
+        fetch(SUPABASE_URL + '/rest/v1/profile_recipes?select=*&profile_id=eq.' +
+          encodeURIComponent(profile.id), { headers: sbHeaders() })
+          .then(res => { if (!res.ok) throw new Error('state pull ' + res.status); return res.json(); })
+      );
+    }
+
+    return Promise.all(jobs)
+      .then(results => {
+        const rows = results[0];
+        const states = results[1] || [];
         setCloudState('online');
         const byId = new Map(rows.map(x => [x.id, x.data]));
+        const stateById = new Map(states.map(s => [s.recipe_id, s]));
         let changed = false;
 
         // Deleting a row outright cannot work: every client treats a recipe the server
         // lacks as one to upload, so the next sync from any device that still holds it
         // puts it straight back. A recipe is removed by keeping its row and flagging it
         // deleted — a tombstone the server can actually state, and clients can act on.
-        const tombstoned = new Set(
-          rows.filter(x => x.data && x.data.deleted).map(x => x.id)
-        );
+        const tombstoned = new Set(rows.filter(x => x.data && x.data.deleted).map(x => x.id));
         if (tombstoned.size) {
           const before = recipes.length;
           recipes = recipes.filter(r => !tombstoned.has(r.id));
           if (recipes.length !== before) changed = true;
         }
+
+        // Merges the shared half with this profile's half. Falls back to whatever the
+        // recipe already carries locally, which is what keeps an unsynced local change
+        // from being wiped by a pull that has not seen it yet.
+        const merge = (content, local) => {
+          const s = stateById.get(content.id);
+          const base = local || {};
+          return Object.assign({}, content, {
+            shelf: s ? s.shelf : (base.shelf || 'To Make'),
+            rating: s ? s.rating : (typeof base.rating === 'number' ? base.rating : null),
+            hidden: s ? !!s.hidden : !!base.hidden,
+            nextPhotoPromptAt: s ? s.next_photo_prompt_at : (base.nextPhotoPromptAt || null)
+          });
+        };
 
         // The server is the shared truth for anything it already knows about — except a
         // recipe deleted here whose tombstone has not reached the server yet. Taking the
@@ -582,26 +668,116 @@
         recipes.forEach((r, i) => {
           if (r.deleted) return;
           const remote = byId.get(r.id);
-          if (remote && JSON.stringify(remote) !== JSON.stringify(r)) { recipes[i] = remote; changed = true; }
+          if (!remote) return;
+          const merged = merge(remote, r);
+          if (JSON.stringify(merged) !== JSON.stringify(r)) { recipes[i] = merged; changed = true; }
         });
-        // Recipes added on somebody else's device.
+
+        // Recipes that exist for this profile but are not on this device yet — added by
+        // someone else, or sent to this profile from another one.
         rows.forEach(x => {
           if (x.data && x.data.deleted) return;
-          if (!recipes.some(r => r.id === x.id)) { recipes.push(x.data); changed = true; }
+          if (recipes.some(r => r.id === x.id)) return;
+          // With profiles on, a recipe only belongs to a profile once it has a row. The
+          // admin is the exception: the shipped cookbook is theirs, so anything without a
+          // row lands on their board and gets one on the next push.
+          const mine = stateById.has(x.id) || !profilesAvailable || (profile && profile.isAdmin);
+          if (!mine) return;
+          recipes.push(merge(x.data, null));
+          changed = true;
         });
-        // Everything in memory has now been merged against the server, so writing back is
-        // safe. Set before the push below, which is gated on it.
+
+        // Hidden is a per-profile removal: the recipe stays for everyone else.
+        const beforeHide = recipes.length;
+        recipes = recipes.filter(r => !r.hidden);
+        if (recipes.length !== beforeHide) changed = true;
+
+        // Everything in memory has now been reconciled against the server, so shared
+        // content is safe to write back. Set before the push below, which needs it.
         contentReconciled = true;
 
         persistLocal(recipes);
-        // Recipes this build ships that the server has not seen yet — a fresh deploy,
-        // or the very first run against an empty table.
-        if (recipes.some(r => !byId.has(r.id))) cloudPush();
+        // Recipes this build ships that the server has not seen yet — a fresh deploy, the
+        // first run against an empty table, or an admin recipe with no profile row.
+        if (recipes.some(r => !byId.has(r.id) || (profilesAvailable && profile && !stateById.has(r.id)))) cloudPush();
         // Never yank the form or a live search out from under someone mid-typing.
         if (changed) syncRender();
         retryPendingPhotos();
       })
       .catch(() => setCloudState('offline'));
+  }
+
+  // ---- Profile plumbing --------------------------------------------------------
+  function loadProfiles() {
+    return fetch(SUPABASE_URL + '/rest/v1/profiles?select=*&order=name', { headers: sbHeaders() })
+      .then(res => { if (!res.ok) throw new Error('profiles ' + res.status); return res.json(); })
+      .then(rows => {
+        allProfiles = rows.map(p => ({ id: p.id, name: p.name, isAdmin: !!p.is_admin }));
+        profilesAvailable = true;
+        return allProfiles;
+      })
+      .catch(() => {
+        // The table is unreachable or missing. Rather than showing an empty journal, fall
+        // back to the single shared list the app used before profiles existed.
+        profilesAvailable = false;
+        allProfiles = [];
+        return [];
+      });
+  }
+
+  function rememberProfile(p) {
+    profile = p;
+    try {
+      if (p) localStorage.setItem(PROFILE_KEY, JSON.stringify(p));
+      else localStorage.removeItem(PROFILE_KEY);
+    } catch (e) { /* a device that cannot remember still works, it just asks each time */ }
+  }
+
+  function recallProfile() {
+    try {
+      const raw = localStorage.getItem(PROFILE_KEY);
+      if (!raw) return null;
+      const saved = JSON.parse(raw);
+      // Take the server's word on the name and admin flag, in case either changed.
+      const fresh = allProfiles.find(p => p.id === saved.id);
+      return fresh || (allProfiles.length ? null : saved);
+    } catch (e) { return null; }
+  }
+
+  function switchProfile(p) {
+    rememberProfile(p);
+    recipes = load();
+    view = { mode: 'board', recipeId: null, search: '' };
+    render();
+    cloudPull();
+  }
+
+  function createProfile(name, isAdmin) {
+    const id = slugify(name) || ('member-' + Date.now());
+    return fetch(SUPABASE_URL + '/rest/v1/profiles?on_conflict=id', {
+      method: 'POST',
+      headers: sbHeaders({ 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates,return=minimal' }),
+      body: JSON.stringify([{ id: id, name: name, is_admin: !!isAdmin }])
+    }).then(res => {
+      if (!res.ok) throw new Error('create profile ' + res.status);
+      return { id: id, name: name, isAdmin: !!isAdmin };
+    });
+  }
+
+  // Sending a recipe is a suggestion, not a verdict: it lands on their To Make shelf with
+  // no rating, and never disturbs a row they already have for it.
+  function sendToProfile(recipe, targetId) {
+    return fetch(SUPABASE_URL + '/rest/v1/profile_recipes', {
+      method: 'POST',
+      headers: sbHeaders({ 'Content-Type': 'application/json', 'Prefer': 'return=minimal,resolution=ignore-duplicates' }),
+      body: JSON.stringify([{
+        profile_id: targetId, recipe_id: recipe.id,
+        shelf: 'To Make', rating: null, hidden: false
+      }])
+    }).then(res => {
+      if (!res.ok && res.status !== 409) throw new Error('send ' + res.status);
+      return true;
+    });
   }
 
   // The importer runs as an edge function because a browser cannot fetch a recipe site
@@ -744,7 +920,42 @@
     else render();
   }
 
+  // Shown until someone says who they are. No password: this is a family kitchen, and a
+  // login screen is friction in exactly the place it hurts most.
+  function renderProfilePicker() {
+    app.innerHTML = `
+      <div class="topbar"><h1>Food Journal</h1></div>
+      <div class="form-view">
+        <div class="hint">Who's cooking? Each person keeps their own shelves and ratings. Recipes and photos are shared.</div>
+        <div class="whogrid">
+          ${allProfiles.map(p => `<button class="whobtn" data-id="${escapeHtml(p.id)}">${escapeHtml(p.name)}${p.isAdmin ? ' <span class="rmeta">(admin)</span>' : ''}</button>`).join('')}
+        </div>
+        <label style="margin-top:22px;">Add someone</label>
+        <div class="importrow">
+          <input type="text" id="newProfileName" placeholder="e.g. Goose">
+          <button class="secondary" id="addProfileBtn">Add</button>
+        </div>
+        <div id="profileMsg" class="importmsg"></div>
+      </div>`;
+    app.querySelectorAll('.whobtn').forEach(b => {
+      b.onclick = () => {
+        const p = allProfiles.find(x => x.id === b.dataset.id);
+        if (p) switchProfile(p);
+      };
+    });
+    document.getElementById('addProfileBtn').onclick = () => {
+      const name = document.getElementById('newProfileName').value.trim();
+      const msg = document.getElementById('profileMsg');
+      if (!name) { msg.className = 'importmsg err'; msg.textContent = 'Give them a name first.'; return; }
+      msg.className = 'importmsg'; msg.textContent = 'Adding…';
+      createProfile(name, false)
+        .then(p => { allProfiles.push(p); switchProfile(p); })
+        .catch(() => { msg.className = 'importmsg err'; msg.textContent = "Couldn't add that profile — are you online?"; });
+    };
+  }
+
   function render() {
+    if (profilesAvailable && !profile) return renderProfilePicker();
     if (view.mode === 'board') renderBoard();
     else if (view.mode === 'detail') renderDetail();
     else if (view.mode === 'form') renderForm();
@@ -760,21 +971,25 @@
         <h1>Food Journal</h1>
         <input type="text" id="searchBox" placeholder="Search by name or tag..." value="${escapeHtml(view.search)}">
         <span id="syncStatus" class="sync ${cloudState}">${cloudLabel()}</span>
+        ${profile ? `<button class="secondary" id="whoBtn" title="Switch person">${escapeHtml(profile.name)}</button>` : ''}
         <button id="addBtn">+ Add Recipe</button>
       </div>
       <div class="board" id="boardCols"></div>
     `;
     document.getElementById('searchBox').oninput = e => { view.search = e.target.value; renderShelves(); };
     document.getElementById('addBtn').onclick = () => { view.mode = 'form'; render(); };
+    const whoBtn = document.getElementById('whoBtn');
+    if (whoBtn) whoBtn.onclick = () => { rememberProfile(null); render(); };
     renderShelves();
   }
 
   function renderShelves() {
     const shelves = ['To Make', 'Making', 'Made'];
     const q = view.search.toLowerCase();
-    // Tombstoned recipes linger in the array until the push lands, so keep them off screen.
+    // Deleted and hidden recipes linger in the array until their push lands, so that the
+    // flag actually reaches the server. Keep them off screen in the meantime.
     const filtered = recipes.filter(r =>
-      !r.deleted &&
+      !r.deleted && !r.hidden &&
       (!q || r.title.toLowerCase().includes(q) || r.tags.some(t => t.toLowerCase().includes(q)))
     );
     const cols = document.getElementById('boardCols');
@@ -862,7 +1077,30 @@
   // next push takes the tombstone with it; the board filters it out meanwhile, and once
   // the server has it the pull drops it from the array for good. That also means a delete
   // made offline still reaches everyone else on reconnect.
+  function isAdmin() {
+    return !profilesAvailable || !profile || profile.isAdmin;
+  }
+
+  // Non-admins hide: the row is theirs, so it never affects anyone else's journal.
+  function hideRecipe(rec) {
+    const r = recipes.find(x => x.id === rec.id) || rec;
+    r.hidden = true;
+    persistLocal(recipes);
+    view.mode = 'board';
+    render();
+    // The recipe has to stay in the array until the push goes out, or the flag never
+    // reaches the server and the next sync brings it straight back. The board already
+    // filters hidden recipes, so it disappears immediately either way.
+    clearTimeout(pushTimer);
+    cloudPush().then(ok => {
+      if (!ok) return;
+      recipes = recipes.filter(x => x.id !== r.id);
+      persistLocal(recipes);
+    });
+  }
+
   function deleteRecipe(rec) {
+    if (!isAdmin()) return hideRecipe(rec);
     const r = recipes.find(x => x.id === rec.id) || rec;
     // Note the photo before tombstoning, so it can be named to the sweep afterwards.
     const photo = (typeof r.image === 'string' && r.image.indexOf('/storage/v1/object/public/') > 0)
@@ -880,15 +1118,46 @@
     cloudPush().then(ok => { if (ok) sweepPhotos(photo ? [photo] : []); });
   }
 
+  function showSendModal(r) {
+    const others = allProfiles.filter(p => !profile || p.id !== profile.id);
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay';
+    overlay.innerHTML = `
+      <div class="modal">
+        <h3>Send "${escapeHtml(r.title)}" to…</h3>
+        <div>It lands on their To Make shelf. Their own rating stays their business.</div>
+        <div class="whogrid">
+          ${others.map(p => `<button class="whobtn" data-id="${escapeHtml(p.id)}">${escapeHtml(p.name)}</button>`).join('')}
+        </div>
+        <div id="sendMsg" class="importmsg"></div>
+        <div class="opts"><button class="secondary" id="sendCancel">Cancel</button></div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => document.body.removeChild(overlay);
+    overlay.querySelector('#sendCancel').onclick = close;
+    const msg = overlay.querySelector('#sendMsg');
+    overlay.querySelectorAll('.whobtn').forEach(b => {
+      b.onclick = () => {
+        const target = others.find(p => p.id === b.dataset.id);
+        msg.className = 'importmsg'; msg.textContent = 'Sending…';
+        sendToProfile(r, target.id)
+          .then(() => { msg.className = 'importmsg ok'; msg.textContent = `Sent to ${target.name}.`; setTimeout(close, 900); })
+          .catch(() => { msg.className = 'importmsg err'; msg.textContent = "Couldn't send that — are you online?"; });
+      };
+    });
+  }
+
   function confirmDeleteModal(r) {
     const overlay = document.createElement('div');
     overlay.className = 'overlay';
     overlay.innerHTML = `
       <div class="modal">
-        <h3>Delete "${escapeHtml(r.title)}"?</h3>
-        <div>It will disappear from the journal on every device. Its photo stays in storage until the next cleanup.</div>
+        <h3>${isAdmin() ? 'Delete' : 'Remove'} "${escapeHtml(r.title)}"?</h3>
+        <div>${isAdmin()
+          ? 'This deletes it for everyone, permanently, along with any ratings and shelf positions other people had for it. Its photo is cleaned up afterwards.'
+          : 'This removes it from your journal only. Everyone else keeps their copy, ratings and all.'}</div>
         <div class="opts">
-          <button class="danger" id="delYes">Delete</button>
+          <button class="danger" id="delYes">${isAdmin() ? 'Delete for everyone' : 'Remove from mine'}</button>
           <button class="secondary" id="delNo">Cancel</button>
         </div>
       </div>`;
@@ -1048,8 +1317,9 @@
 
   function renderDetail() {
     const r = recipes.find(x => x.id === view.recipeId);
-    // Also bounce if it was deleted on another device while this one had it open.
-    if (!r || r.deleted) { view.mode = 'board'; return render(); }
+    // Also bounce if it was deleted on another device, or hidden from this journal,
+    // while it was open.
+    if (!r || r.deleted || r.hidden) { view.mode = 'board'; return render(); }
 
     const photoBadge = r.imageStatus === 'has-photo' ? '' :
       `<span class="photo-pending-badge">${r.imageStatus === 'ai-pending' ? 'Photo pending (AI gen not connected)' : 'Photo pending'}</span>`;
@@ -1065,7 +1335,8 @@
           <button class="secondary" id="rateBtn">${r.rating != null ? `Rating: ${r.rating}/10 &middot; Update` : 'Add Rating'}</button>
           <button class="secondary" id="editBtn" style="margin-left:auto;">Edit</button>
           <button class="secondary" id="changePhotoBtn">${r.imageStatus === 'has-photo' ? 'Replace Photo' : 'Change Photo'}</button>
-          <button class="secondary danger" id="deleteBtn">Delete</button>
+          ${profilesAvailable && allProfiles.length > 1 ? `<button class="secondary" id="sendBtn">Send to…</button>` : ''}
+          <button class="secondary danger" id="deleteBtn">${isAdmin() ? 'Delete' : 'Remove'}</button>
         </div>
         <div class="card-header">
           ${photoBadge}
@@ -1096,6 +1367,8 @@
     document.getElementById('rateBtn').onclick = () => showRatingModal(r, () => renderDetail());
     document.getElementById('deleteBtn').onclick = () => confirmDeleteModal(r);
     document.getElementById('editBtn').onclick = () => { view.mode = 'form'; view.editId = r.id; render(); };
+    const sendBtn = document.getElementById('sendBtn');
+    if (sendBtn) sendBtn.onclick = () => showSendModal(r);
     document.getElementById('changePhotoBtn').onclick = () => openChangePhotoModal(r);
     maybeShowPhotoPrompt(r);
   }
@@ -1264,11 +1537,20 @@
     return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
 
-  render();
+  // Ask the server who exists before drawing anything, so the picker is real rather than
+  // a guess. If that fails the app falls back to the single shared journal it had before
+  // profiles, which means a bad deploy or an unreachable table degrades instead of
+  // showing an empty kitchen.
+  loadProfiles().then(() => {
+    if (profilesAvailable) {
+      profile = recallProfile();
+      if (profile) rememberProfile(profile);
+    }
+    recipes = load();
+    render();
+    cloudPull();
+  });
 
-  // Pull once on open, then keep in step: a poll for changes made on other devices,
-  // and an immediate check whenever the tablet comes back to the foreground.
-  cloudPull();
   setInterval(cloudPull, POLL_MS);
   window.addEventListener('focus', cloudPull);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) cloudPull(); });
