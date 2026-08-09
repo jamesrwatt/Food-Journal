@@ -20,7 +20,10 @@
         .\backup-journal.ps1 -OutRoot D:\somewhere
 #>
 param(
-    [string]$OutRoot = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'backups')
+    [string]$OutRoot = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'backups'),
+    # Roughly two months of weekly runs. Unbounded growth is fine by hand and not fine on
+    # a schedule, and old copies of a journal that changes slowly are worth little.
+    [int]$Keep = 8
 )
 
 $ErrorActionPreference = 'Stop'
@@ -150,5 +153,17 @@ Verify a backup by opening recipes.txt and spot-checking photos\. If those two
 look right, the journal can be rebuilt.
 "@
 [IO.File]::WriteAllText((Join-Path $out 'README.txt'), $readme, [Text.Encoding]::UTF8)
+
+# ---- Retention ---------------------------------------------------------------
+# Only prunes after this run has written its files, so a failure part way through can
+# never take the older copies with it.
+if ($Keep -gt 0) {
+    $all = @(Get-ChildItem $OutRoot -Directory | Sort-Object Name -Descending)
+    $old = @($all | Select-Object -Skip $Keep)
+    foreach ($d in $old) {
+        Remove-Item $d.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if ($old.Count) { Write-Host ("  pruned : {0} old backup(s), keeping {1}" -f $old.Count, $Keep) }
+}
 
 Write-Host "Done: $out"
