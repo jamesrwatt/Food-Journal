@@ -113,6 +113,14 @@
   .srcgrid img { width: 100%; height: 96px; object-fit: cover; border-radius: 6px; border: 2px solid var(--border); cursor: pointer; background: #eee; }
   .srcgrid img:hover { border-color: var(--green); }
   .srcgrid img.busy { border-color: var(--green); opacity: 0.45; }
+  /* Deliberately large: on a tablet this is a long-press target, not a text field. */
+  .pastebox {
+    margin-top: 12px; min-height: 78px; padding: 14px;
+    border: 2px dashed var(--border); border-radius: 8px;
+    color: var(--muted); font-size: 0.85rem; background: #fff;
+    display: flex; align-items: center; justify-content: center; text-align: center;
+  }
+  .pastebox:focus { outline: none; border-color: var(--green); color: var(--text); }
 
   /* ---- Profiles ---- */
   .whogrid { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
@@ -1263,6 +1271,7 @@
         <div class="opts">
           <button id="photoTake">Take Photo</button>
           <button id="photoChoose">Choose Existing</button>
+          <button id="photoPaste">Paste Photo</button>
           ${r.sourceImages && r.sourceImages.length ? `<button id="photoSource">From Recipe's Page</button>` : ''}
           <button id="photo30" class="secondary">In 30 min</button>
           <button id="photo60" class="secondary">In 60 min</button>
@@ -1274,6 +1283,7 @@
     const close = () => document.body.removeChild(overlay);
     document.getElementById('photoTake').onclick = () => pickImage(document.getElementById('photoFile'), true);
     document.getElementById('photoChoose').onclick = () => pickImage(document.getElementById('photoFile'), false);
+    document.getElementById('photoPaste').onclick = () => { close(); openPastePhotoModal(r, () => renderDetail()); };
     const promptSrcBtn = document.getElementById('photoSource');
     if (promptSrcBtn) promptSrcBtn.onclick = () => { close(); openSourceImagePicker(r, () => renderDetail()); };
     document.getElementById('photoFile').onchange = e => {
@@ -1297,6 +1307,97 @@
       save(recipes); close();
       renderDetail();
     };
+  }
+
+  // Copying an image straight off a web page beats saving it to the photo library and
+  // hunting for it afterwards, which is the whole point on a tablet.
+  //
+  // Two routes, because they are not equally supported. navigator.clipboard.read() gets
+  // the image in one tap where it works, but it needs permission, needs a user gesture,
+  // and Safari in particular is fussy. Where it is refused or empty, a focusable box the
+  // user can long-press and Paste into fires an ordinary paste event, which works
+  // everywhere. Both end at the same place: a File through the normal downscale and
+  // upload path.
+  function readClipboardImage() {
+    if (!navigator.clipboard || !navigator.clipboard.read) {
+      return Promise.reject(new Error('unsupported'));
+    }
+    return navigator.clipboard.read().then(items => {
+      for (const item of items) {
+        const type = (item.types || []).find(t => t.indexOf('image/') === 0);
+        if (type) {
+          return item.getType(type).then(blob =>
+            new File([blob], 'pasted.' + (type.split('/')[1] || 'png'), { type: type }));
+        }
+      }
+      throw new Error('no-image');
+    });
+  }
+
+  function fileFromPasteEvent(e) {
+    const items = (e.clipboardData && e.clipboardData.items) || [];
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type && items[i].type.indexOf('image/') === 0) {
+        const f = items[i].getAsFile();
+        if (f) return f;
+      }
+    }
+    return null;
+  }
+
+  function openPastePhotoModal(r, after) {
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay';
+    overlay.innerHTML = `
+      <div class="modal">
+        <h3>Paste a photo</h3>
+        <div>Copy an image from a web page, then paste it here.</div>
+        <div class="opts"><button id="pasteTry">Paste from clipboard</button></div>
+        <div id="pasteBox" class="pastebox" contenteditable="true" role="textbox"
+             aria-label="Paste target">Or long-press here and choose Paste</div>
+        <div id="pasteMsg" class="importmsg"></div>
+        <div class="opts"><button class="secondary" id="pasteCancel">Cancel</button></div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => document.body.removeChild(overlay);
+    const msg = overlay.querySelector('#pasteMsg');
+    let busy = false;
+
+    const use = (file) => {
+      if (busy) return;
+      busy = true;
+      msg.className = 'importmsg';
+      msg.textContent = 'Saving…';
+      readImageDownscaled(file,
+        shot => applyPhoto(r, shot, () => { close(); after(); }, m => { busy = false; msg.className = 'importmsg err'; msg.textContent = m; }),
+        m => { busy = false; msg.className = 'importmsg err'; msg.textContent = m; });
+    };
+
+    overlay.querySelector('#pasteCancel').onclick = close;
+    overlay.querySelector('#pasteTry').onclick = () => {
+      msg.className = 'importmsg';
+      msg.textContent = 'Reading the clipboard…';
+      readClipboardImage()
+        .then(use)
+        .catch(err => {
+          msg.className = 'importmsg err';
+          msg.textContent = err && err.message === 'no-image'
+            ? "There's no image on the clipboard — copy one first, then try again."
+            : "This browser wouldn't let the app read the clipboard. Long-press the box below and choose Paste instead.";
+          const box = overlay.querySelector('#pasteBox');
+          box.focus();
+        });
+    };
+    overlay.querySelector('#pasteBox').addEventListener('paste', e => {
+      const file = fileFromPasteEvent(e);
+      e.preventDefault();
+      if (!file) {
+        msg.className = 'importmsg err';
+        msg.textContent = "That paste didn't contain an image. Copy the image itself rather than a link to it.";
+        return;
+      }
+      use(file);
+    });
   }
 
   // For an imported recipe, offer the photos that were on the source page. The chosen one
@@ -1372,6 +1473,7 @@
         <div class="opts">
           <button id="changePhotoTake">Take Photo</button>
           <button id="changePhotoChoose">Choose Existing</button>
+          <button id="changePhotoPaste">Paste Photo</button>
           ${r.sourceImages && r.sourceImages.length ? `<button id="changePhotoSource">From Recipe's Page</button>` : ''}
           <button id="changePhotoCancel" class="secondary">Cancel</button>
         </div>
@@ -1381,6 +1483,7 @@
     const close = () => document.body.removeChild(overlay);
     document.getElementById('changePhotoTake').onclick = () => pickImage(document.getElementById('changePhotoFile'), true);
     document.getElementById('changePhotoChoose').onclick = () => pickImage(document.getElementById('changePhotoFile'), false);
+    document.getElementById('changePhotoPaste').onclick = () => { close(); openPastePhotoModal(r, () => renderDetail()); };
     const srcBtn = document.getElementById('changePhotoSource');
     if (srcBtn) srcBtn.onclick = () => { close(); openSourceImagePicker(r, () => renderDetail()); };
     document.getElementById('changePhotoFile').onchange = e => {
