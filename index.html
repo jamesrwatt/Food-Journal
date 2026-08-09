@@ -651,12 +651,18 @@
         // Merges the shared half with this profile's half. Falls back to whatever the
         // recipe already carries locally, which is what keeps an unsynced local change
         // from being wiped by a pull that has not seen it yet.
+        // Falls back through: this profile's row, then whatever is already on the device,
+        // then the legacy shelf and rating still carried on the shared row. That last step
+        // matters during the transition — a recipe added after the migration has no
+        // per-profile row yet, and defaulting it would silently move it back to To Make
+        // and drop its rating rather than adopting the state it already had.
         const merge = (content, local) => {
           const s = stateById.get(content.id);
           const base = local || {};
+          const num = (v) => (typeof v === 'number' ? v : null);
           return Object.assign({}, content, {
-            shelf: s ? s.shelf : (base.shelf || 'To Make'),
-            rating: s ? s.rating : (typeof base.rating === 'number' ? base.rating : null),
+            shelf: s ? s.shelf : (base.shelf || content.shelf || 'To Make'),
+            rating: s ? s.rating : (num(base.rating) !== null ? base.rating : num(content.rating)),
             hidden: s ? !!s.hidden : !!base.hidden,
             nextPhotoPromptAt: s ? s.next_photo_prompt_at : (base.nextPhotoPromptAt || null)
           });
