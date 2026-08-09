@@ -1344,13 +1344,33 @@
     });
     // The browser asks for clipboard permission asynchronously, and its prompt takes
     // focus off the page — but clipboard.read() requires a focused document, so the call
-    // that triggered the prompt rejects even when permission is then granted. Granting it
-    // and getting an error is exactly that. Wait for focus to come back and try once more,
-    // which is the point at which permission has actually been decided.
+    // that triggered the prompt rejects even when permission is then granted. Retry once
+    // focus returns, which is when permission has actually been decided.
+    //
+    // The retry can itself fail, because by then the user activation from the button tap
+    // has expired and some browsers require one. That is not worth fighting: if the
+    // permission is now granted, the next tap will simply work, and the caller says so.
     return attempt().catch(err => {
       if (err && err.message === 'no-image') throw err;
-      return waitForFocus(3000).then(attempt);
+      return waitForFocus(3000).then(attempt).catch(err2 => {
+        err2 = err2 || err;
+        err2.firstError = err;
+        throw err2;
+      });
     });
+  }
+
+  // Distinguishes "you blocked this earlier so I cannot even ask" from "you have not been
+  // asked yet" — they need completely different advice, and guessing between them is how
+  // this turns into a rabbit hole.
+  function clipboardPermissionState() {
+    if (!navigator.permissions || !navigator.permissions.query) return Promise.resolve('unknown');
+    try {
+      return navigator.permissions.query({ name: 'clipboard-read' })
+        .then(s => s.state).catch(() => 'unknown');
+    } catch (e) {
+      return Promise.resolve('unknown');
+    }
   }
 
   function fileFromPasteEvent(e) {
@@ -1370,17 +1390,36 @@
     overlay.innerHTML = `
       <div class="modal">
         <h3>Paste a photo</h3>
-        <div>Copy an image from a web page, then paste it here.</div>
-        <div class="opts"><button id="pasteTry">Paste from clipboard</button></div>
+        <div>Copy an image from a web page, then press <b>Ctrl+V</b> — or long-press the box and choose Paste.</div>
         <div id="pasteBox" class="pastebox" contenteditable="true" role="textbox"
-             aria-label="Paste target">Or tap here and press Ctrl+V — on a tablet, long-press and choose Paste</div>
+             aria-label="Paste target">Ready to paste</div>
         <div id="pasteMsg" class="importmsg"></div>
-        <div class="opts"><button class="secondary" id="pasteCancel">Cancel</button></div>
+        <div class="opts">
+          <button class="secondary" id="pasteTry">Paste from clipboard</button>
+          <button class="secondary" id="pasteCancel">Cancel</button>
+        </div>
       </div>`;
     document.body.appendChild(overlay);
-    const close = () => document.body.removeChild(overlay);
     const msg = overlay.querySelector('#pasteMsg');
     let busy = false;
+
+    // Catch the paste anywhere in the document while this dialog is open, not just inside
+    // the box. Pressing Ctrl+V the moment the dialog appears is the obvious thing to do,
+    // and it should not depend on having clicked the right element first. This path needs
+    // no permission at all, which is why it is the one being made effortless.
+    const onDocPaste = (e) => {
+      const file = fileFromPasteEvent(e);
+      if (!file) return;
+      e.preventDefault();
+      use(file);
+    };
+    document.addEventListener('paste', onDocPaste, true);
+    const close = () => {
+      document.removeEventListener('paste', onDocPaste, true);
+      document.body.removeChild(overlay);
+    };
+    // Focused on open so a keyboard paste lands immediately.
+    setTimeout(() => { const b = overlay.querySelector('#pasteBox'); if (b) b.focus(); }, 0);
 
     const use = (file) => {
       if (busy) return;
@@ -1395,26 +1434,42 @@
     overlay.querySelector('#pasteCancel').onclick = close;
     overlay.querySelector('#pasteTry').onclick = () => {
       msg.className = 'importmsg';
-      msg.textContent = 'Reading the clipboard… if you are asked for permission, allow it and this carries on.';
+      msg.textContent = 'Reading the clipboard…';
       readClipboardImage()
         .then(use)
         .catch(err => {
-          msg.className = 'importmsg err';
-          msg.textContent = err && err.message === 'no-image'
-            ? "There's no image on the clipboard — copy one first, then try again."
-            : "This browser wouldn't let the app read the clipboard. Use the box below instead: tap it, then press Ctrl+V, or long-press and choose Paste.";
-          overlay.querySelector('#pasteBox').focus();
+          if (err && err.message === 'no-image') {
+            msg.className = 'importmsg err';
+            msg.textContent = "There's no image on the clipboard — copy one first, then try again.";
+            return;
+          }
+          // Report what the browser actually said rather than a guess. These failures
+          // differ by browser and by how permission was answered, and the difference
+          // decides what the user should do next.
+          return clipboardPermissionState().then(state => {
+            const detail = (err && (err.name || err.message)) ? ` (${err.name || err.message})` : '';
+            msg.className = 'importmsg err';
+            if (state === 'denied') {
+              msg.textContent = 'Clipboard access is blocked for this site, so the browser will not even ask. '
+                + 'Either allow it via the padlock in the address bar, or just use the box below — tap it and press Ctrl+V.';
+            } else if (state === 'granted') {
+              msg.textContent = 'Permission is granted now — tap Paste from clipboard once more and it will work. '
+                + 'Or use the box below.';
+            } else {
+              msg.textContent = 'This browser would not let the app read the clipboard' + detail
+                + '. Use the box below instead: tap it and press Ctrl+V, or long-press and choose Paste.';
+            }
+            overlay.querySelector('#pasteBox').focus();
+          });
         });
     };
+    // A paste that carried no image still needs saying, and only the box can tell the
+    // difference between "not an image" and "pasted somewhere else entirely".
     overlay.querySelector('#pasteBox').addEventListener('paste', e => {
-      const file = fileFromPasteEvent(e);
+      if (fileFromPasteEvent(e)) return; // the document-level handler takes it
       e.preventDefault();
-      if (!file) {
-        msg.className = 'importmsg err';
-        msg.textContent = "That paste didn't contain an image. Copy the image itself rather than a link to it.";
-        return;
-      }
-      use(file);
+      msg.className = 'importmsg err';
+      msg.textContent = "That paste didn't contain an image. Copy the image itself rather than a link to it.";
     });
   }
 
