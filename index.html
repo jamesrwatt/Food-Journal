@@ -464,11 +464,15 @@
   function load() {
     let recipes = [];
     try { recipes = JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch (e) { recipes = []; }
-    let changed = false;
     SEED_RECIPES.forEach(seed => {
-      if (!recipes.find(r => r.id === seed.id)) { recipes.push(seed); changed = true; }
+      if (!recipes.find(r => r.id === seed.id)) recipes.push(seed);
     });
-    if (changed) save(recipes);
+    // Deliberately does NOT save. Seeding is a local starting point, not news for the
+    // server: SEED_RECIPES carry image: null, shelf: 'To Make' and rating: null, so
+    // pushing them before a pull has merged the real state overwrites everyone's photos,
+    // shelves and ratings with blanks. Any device with empty storage — a new phone, a
+    // private window, evicted storage — took that path. cloudPull() pushes once it has
+    // actually reconciled with the server.
     return recipes;
   }
   // ---- Shared state via Supabase ---------------------------------------------
@@ -483,6 +487,12 @@
 
   let cloudState = 'connecting'; // connecting | online | offline
   let pushTimer = null;
+
+  // Nothing is written to the server until a pull has succeeded in this session. Before
+  // that the in-memory list is only what this build ships plus whatever the cache held,
+  // and pushing it would overwrite server data this device has never seen. The device
+  // with the least information must never be the one that wins.
+  let contentReconciled = false;
 
   function sbHeaders(extra) {
     return Object.assign({ apikey: SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY }, extra || {});
@@ -520,6 +530,7 @@
   }
 
   function cloudPush() {
+    if (!contentReconciled) return Promise.resolve(false);
     return fetch(SUPABASE_URL + '/rest/v1/recipes?on_conflict=id', {
       method: 'POST',
       headers: sbHeaders({ 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates,return=minimal' }),
@@ -576,6 +587,10 @@
           if (x.data && x.data.deleted) return;
           if (!recipes.some(r => r.id === x.id)) { recipes.push(x.data); changed = true; }
         });
+        // Everything in memory has now been merged against the server, so writing back is
+        // safe. Set before the push below, which is gated on it.
+        contentReconciled = true;
+
         persistLocal(recipes);
         // Recipes this build ships that the server has not seen yet — a fresh deploy,
         // or the very first run against an empty table.
