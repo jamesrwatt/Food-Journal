@@ -626,13 +626,27 @@
           encodeURIComponent(profile.id), { headers: sbHeaders() })
           .then(res => { if (!res.ok) throw new Error('state pull ' + res.status); return res.json(); })
       );
+      // Refresh who exists. Without this, someone who adds themselves on their own tablet
+      // never turns up in Send to... on anyone else's device until the page is reloaded.
+      jobs.push(
+        fetch(SUPABASE_URL + '/rest/v1/profiles?select=*&order=name', { headers: sbHeaders() })
+          .then(res => (res.ok ? res.json() : null))
+          .catch(() => null)
+      );
     }
 
     return Promise.all(jobs)
       .then(results => {
         const rows = results[0];
         const states = results[1] || [];
+        const people = results[2];
         setCloudState('online');
+        if (people && people.length) {
+          allProfiles = people.map(p => ({ id: p.id, name: p.name, isAdmin: !!p.is_admin }));
+          // Take the server's word on our own name and admin flag in case they changed.
+          const me = allProfiles.find(p => p.id === profile.id);
+          if (me) { profile = me; rememberProfile(me); }
+        }
         const byId = new Map(rows.map(x => [x.id, x.data]));
         const stateById = new Map(states.map(s => [s.recipe_id, s]));
         let changed = false;
@@ -729,6 +743,13 @@
         allProfiles = [];
         return [];
       });
+  }
+
+  // Adding by id rather than pushing blindly. The server upserts on id, so a double-tap
+  // on Add makes one row there but would otherwise leave two identical tiles here.
+  function rememberKnownProfile(p) {
+    const i = allProfiles.findIndex(x => x.id === p.id);
+    if (i >= 0) allProfiles[i] = p; else allProfiles.push(p);
   }
 
   function rememberProfile(p) {
@@ -949,14 +970,28 @@
         if (p) switchProfile(p);
       };
     });
+    let adding = false;
     document.getElementById('addProfileBtn').onclick = () => {
+      const btn = document.getElementById('addProfileBtn');
       const name = document.getElementById('newProfileName').value.trim();
       const msg = document.getElementById('profileMsg');
       if (!name) { msg.className = 'importmsg err'; msg.textContent = 'Give them a name first.'; return; }
+      // Without this, a second tap while the first request is in flight adds the same
+      // person twice on screen.
+      if (adding) return;
+      const existing = allProfiles.find(p => p.name.toLowerCase() === name.toLowerCase());
+      if (existing) { switchProfile(existing); return; }
+      adding = true;
+      btn.disabled = true;
       msg.className = 'importmsg'; msg.textContent = 'Adding…';
       createProfile(name, false)
-        .then(p => { allProfiles.push(p); switchProfile(p); })
-        .catch(() => { msg.className = 'importmsg err'; msg.textContent = "Couldn't add that profile — are you online?"; });
+        .then(p => { rememberKnownProfile(p); switchProfile(p); })
+        .catch(() => {
+          adding = false;
+          btn.disabled = false;
+          msg.className = 'importmsg err';
+          msg.textContent = "Couldn't add that profile — are you online?";
+        });
     };
   }
 
