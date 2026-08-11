@@ -102,6 +102,29 @@
 
   .notes { font-size: clamp(0.8rem,1.7vh,1rem); line-height: 1.5; white-space: pre-wrap; color: var(--text); }
 
+  /* ---- Full-screen photo viewer ---- */
+  .recipe-photo { cursor: zoom-in; }
+  .photoviewer {
+    background: rgba(0,0,0,0.92); flex-direction: column; z-index: 60;
+    /* The browser must not claim the gestures - pinch and drag are handled here. */
+    touch-action: none; overflow: hidden; user-select: none;
+  }
+  .pvimg {
+    max-width: 100vw; max-height: 100vh; object-fit: contain;
+    transform-origin: 0 0; will-change: transform;
+    -webkit-user-drag: none; user-select: none;
+  }
+  .pvclose {
+    position: fixed; top: max(10px, env(safe-area-inset-top)); right: 12px; z-index: 2;
+    width: 44px; height: 44px; border-radius: 22px; font-size: 1.2rem; line-height: 1;
+    background: rgba(255,255,255,0.9); color: var(--text); border: none; padding: 0;
+  }
+  .pvhint {
+    position: fixed; bottom: max(14px, env(safe-area-inset-bottom)); left: 0; right: 0;
+    text-align: center; color: rgba(255,255,255,0.75); font-size: 0.8rem;
+    pointer-events: none; transition: opacity 0.4s;
+  }
+
   /* ---- URL import ---- */
   .importrow { display: flex; gap: 8px; align-items: center; }
   .importrow input { flex: 1 1 auto; margin: 0; }
@@ -1309,6 +1332,161 @@
     };
   }
 
+  // Full-screen photo viewer. Worth the pointer-event handling rather than leaning on the
+  // browser: pinch-zoom on a page does not work usefully inside a fixed overlay, and the
+  // point of this on a tablet is looking closely at a dish, not at the page around it.
+  //
+  // One transform drives everything — scale plus a translation — so pinch, double-tap and
+  // wheel all just set those two values and clamp() keeps the image from being flung off
+  // screen or shrunk below fit.
+  function openPhotoViewer(src, alt) {
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay photoviewer';
+    overlay.innerHTML = `
+      <button class="pvclose" id="pvClose" aria-label="Close photo">&#10005;</button>
+      <img class="pvimg" id="pvImg" src="${escapeHtml(src)}" alt="${escapeHtml(alt || '')}">
+      <div class="pvhint" id="pvHint">Pinch, double-tap or scroll to zoom</div>`;
+    document.body.appendChild(overlay);
+
+    const img = overlay.querySelector('#pvImg');
+    const hint = overlay.querySelector('#pvHint');
+    const MIN = 1, MAX = 5;
+    let scale = 1, tx = 0, ty = 0;
+    let base = null; // the image's un-zoomed rect, measured once it has laid out
+
+    const apply = () => {
+      img.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+      img.style.cursor = scale > 1 ? 'grab' : 'zoom-in';
+    };
+
+    // Keeps the image covering the viewport where it can, and centred where it cannot,
+    // so panning never strands it in a corner with a void beside it.
+    const clampPan = () => {
+      if (!base) return;
+      const w = base.width * scale, h = base.height * scale;
+      const maxX = Math.max(0, (w - window.innerWidth) / 2);
+      const maxY = Math.max(0, (h - window.innerHeight) / 2);
+      tx = Math.min(maxX, Math.max(-maxX, tx));
+      ty = Math.min(maxY, Math.max(-maxY, ty));
+    };
+
+    // Zooms about a point, so what is under the fingers stays under the fingers.
+    const zoomTo = (next, cx, cy) => {
+      if (!base) return;
+      next = Math.min(MAX, Math.max(MIN, next));
+      const centreX = base.left + base.width / 2 + tx;
+      const centreY = base.top + base.height / 2 + ty;
+      const k = next / scale;
+      tx += (centreX - cx) * (k - 1);
+      ty += (centreY - cy) * (k - 1);
+      scale = next;
+      if (scale === MIN) { tx = 0; ty = 0; }
+      clampPan();
+      apply();
+    };
+
+    const measure = () => {
+      // Reset before measuring, or the transform is baked into the numbers.
+      const t = img.style.transform;
+      img.style.transform = '';
+      base = img.getBoundingClientRect();
+      img.style.transform = t;
+    };
+    if (img.complete) setTimeout(measure, 0); else img.onload = measure;
+    window.addEventListener('resize', measure);
+
+    const pointers = new Map();
+    let pinchStart = 0, scaleStart = 1, panStart = null;
+    // A gesture only counts as a tap if one finger went down and came up again without
+    // travelling. Without this a pinch release registers as a tap, so the next tap is read
+    // as a double-tap and throws away the zoom the pinch just set.
+    let gestureMulti = false, gestureMoved = false, gestureStart = null;
+
+    img.addEventListener('pointerdown', e => {
+      img.setPointerCapture(e.pointerId);
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pointers.size === 1) {
+        gestureMulti = false; gestureMoved = false;
+        gestureStart = { x: e.clientX, y: e.clientY, t: Date.now() };
+      }
+      if (pointers.size === 2) {
+        gestureMulti = true;
+        const [a, b] = [...pointers.values()];
+        pinchStart = Math.hypot(a.x - b.x, a.y - b.y);
+        scaleStart = scale;
+      } else if (scale > 1) {
+        panStart = { x: e.clientX - tx, y: e.clientY - ty };
+      }
+    });
+
+    img.addEventListener('pointermove', e => {
+      if (!pointers.has(e.pointerId)) return;
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pointers.size === 2) {
+        const [a, b] = [...pointers.values()];
+        const dist = Math.hypot(a.x - b.x, a.y - b.y);
+        if (pinchStart > 0) {
+          zoomTo(scaleStart * (dist / pinchStart), (a.x + b.x) / 2, (a.y + b.y) / 2);
+        }
+      } else if (panStart && scale > 1) {
+        tx = e.clientX - panStart.x;
+        ty = e.clientY - panStart.y;
+        clampPan();
+        apply();
+      }
+      if (gestureStart && Math.hypot(e.clientX - gestureStart.x, e.clientY - gestureStart.y) > 10) {
+        gestureMoved = true;
+      }
+    });
+
+    const release = e => {
+      pointers.delete(e.pointerId);
+      if (pointers.size < 2) pinchStart = 0;
+      if (pointers.size === 0) panStart = null;
+    };
+    img.addEventListener('pointerup', release);
+    img.addEventListener('pointercancel', release);
+
+    // Double-tap and double-click both land here; toggling beats fiddling for a specific
+    // zoom level when your hands are covered in flour.
+    let lastTap = 0;
+    img.addEventListener('pointerup', e => {
+      const now = Date.now();
+      const wasTap = !gestureMulti && !gestureMoved && pointers.size === 0
+        && gestureStart && (now - gestureStart.t) < 400;
+      if (!wasTap) { lastTap = 0; return; }
+      if (now - lastTap < 300) {
+        zoomTo(scale > 1 ? MIN : 2.5, e.clientX, e.clientY);
+        lastTap = 0;
+      } else {
+        lastTap = now;
+      }
+    });
+
+    overlay.addEventListener('wheel', e => {
+      e.preventDefault();
+      zoomTo(scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15), e.clientX, e.clientY);
+    }, { passive: false });
+
+    const close = () => {
+      window.removeEventListener('resize', measure);
+      document.removeEventListener('keydown', onKey);
+      if (overlay.parentNode) document.body.removeChild(overlay);
+    };
+    const onKey = e => {
+      if (e.key === 'Escape') close();
+      if (e.key === '0') { scale = MIN; tx = 0; ty = 0; apply(); }
+    };
+    document.addEventListener('keydown', onKey);
+    overlay.querySelector('#pvClose').onclick = close;
+    // Tapping the backdrop closes, but only when not zoomed in — otherwise every pan that
+    // ends off the image would dismiss the thing you are studying.
+    overlay.addEventListener('click', e => { if (e.target === overlay && scale === MIN) close(); });
+
+    setTimeout(() => { hint.style.opacity = '0'; }, 2600);
+    return close;
+  }
+
   // Copying an image straight off a web page beats saving it to the photo library and
   // hunting for it afterwards, which is the whole point on a tablet.
   //
@@ -1492,7 +1670,8 @@
     const photoBadge = r.imageStatus === 'has-photo' ? '' :
       `<span class="photo-pending-badge">${r.imageStatus === 'ai-pending' ? 'Photo pending (AI gen not connected)' : 'Photo pending'}</span>`;
     const photoBlock = r.imageStatus === 'has-photo' && r.image
-      ? `<div class="photo-wrap"><img class="recipe-photo" src="${escapeHtml(r.image)}" alt="${escapeHtml(r.title)}"></div>`
+      ? `<div class="photo-wrap"><img class="recipe-photo" src="${escapeHtml(r.image)}" alt="${escapeHtml(r.title)}"
+           role="button" tabindex="0" title="Tap to view full screen"></div>`
       : '';
 
     app.innerHTML = `
@@ -1535,6 +1714,12 @@
     document.getElementById('rateBtn').onclick = () => showRatingModal(r, () => renderDetail());
     document.getElementById('deleteBtn').onclick = () => confirmDeleteModal(r);
     document.getElementById('editBtn').onclick = () => { view.mode = 'form'; view.editId = r.id; render(); };
+    const photoEl = app.querySelector('.recipe-photo');
+    if (photoEl) {
+      const openIt = () => openPhotoViewer(r.image, r.title);
+      photoEl.onclick = openIt;
+      photoEl.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openIt(); } };
+    }
     const sendBtn = document.getElementById('sendBtn');
     if (sendBtn) sendBtn.onclick = () => showSendModal(r);
     document.getElementById('changePhotoBtn').onclick = () => openChangePhotoModal(r);
