@@ -17,7 +17,7 @@ Works on any phone, tablet or desktop browser. No install, no login.
 **Add recipes three ways.**
 - Paste a link. The importer reads the recipe from the page, filling in title, times, servings, ingredients and steps, and offers any photos it found on that page. Sites without structured recipe data get a best-guess read of the article text, flagged as such.
 - Type it in by hand.
-- Send a photo of a cookbook page, or a link to a site that blocks importers, to Claude in chat.
+- Send a photo of a cookbook page, or a link to a site that blocks importers, to Claude in chat. Those go straight into the database via `tools/add-recipe.ps1` and appear on every device within about thirty seconds — no deploy, and `index.html` never changes.
 
 **Photos.** Take one with the camera, choose an existing one, paste one (Ctrl+V, right-click, or long-press → Paste), or use one from the recipe's own page. Photos are downscaled before upload and stored once, shared by everyone.
 
@@ -41,7 +41,7 @@ State lives in [Supabase](https://supabase.com):
 | `profiles` | who exists, and who is admin |
 | `profile_recipes` | shelf, rating and visibility, per person per recipe |
 
-Photos go in a public `recipe-photos` storage bucket. `localStorage` is an offline cache, not the source of truth.
+Photos go in a public `recipe-photos` storage bucket. `localStorage` is an offline cache, not the source of truth, and `index.html` ships no recipes at all — a fresh device gets everything from the database on its first sync.
 
 Three edge functions in `supabase/functions/`:
 
