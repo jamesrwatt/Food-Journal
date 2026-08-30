@@ -67,6 +67,7 @@
     .topbar input[type="text"] { flex: 1 1 100%; order: 3; }
   }
   .no-photo-badge { font-size: 0.68rem; color: #8a5a2b; }
+  .last-made { font-size: 0.68rem; color: var(--muted); }
 
   /* ---- Detail (tablet card) view ---- */
   /* .detail is the single scroll container for this view: the bar, photo header,
@@ -219,7 +220,7 @@
   const PHOTO_BUCKET = 'recipe-photos';
   const POLL_MS = 30000;
   const PROFILE_KEY = 'foodJournalProfile';
-  const PROFILE_FIELDS = ['shelf', 'rating', 'hidden', 'nextPhotoPromptAt'];
+  const PROFILE_FIELDS = ['shelf', 'rating', 'hidden', 'nextPhotoPromptAt', 'lastMade'];
 
   let profile = null;            // { id, name, isAdmin } — whose journal this device shows
   let allProfiles = [];
@@ -318,7 +319,8 @@
         shelf: r.shelf || 'To Make',
         rating: (typeof r.rating === 'number') ? r.rating : null,
         hidden: !!r.hidden,
-        next_photo_prompt_at: (typeof r.nextPhotoPromptAt === 'number') ? r.nextPhotoPromptAt : null
+        next_photo_prompt_at: (typeof r.nextPhotoPromptAt === 'number') ? r.nextPhotoPromptAt : null,
+        last_made: r.lastMade || null
       })), 'profile_id,recipe_id'));
     }
     return Promise.all(jobs)
@@ -402,7 +404,12 @@
             shelf: s ? s.shelf : (base.shelf || content.shelf || 'To Make'),
             rating: s ? s.rating : (num(base.rating) !== null ? base.rating : num(content.rating)),
             hidden: s ? !!s.hidden : !!base.hidden,
-            nextPhotoPromptAt: s ? s.next_photo_prompt_at : (base.nextPhotoPromptAt || null)
+            nextPhotoPromptAt: s ? s.next_photo_prompt_at : (base.nextPhotoPromptAt || null),
+            // A row from a device still on the old build has no last_made key at all.
+            // Reading it as null would erase a date this device just stamped, so an
+            // absent column falls back to what is already here; only a row that
+            // actually carries the field is allowed to clear it.
+            lastMade: (s && 'last_made' in s) ? s.last_made : (base.lastMade || null)
           });
         };
 
@@ -777,14 +784,33 @@
     });
   }
 
+  // "Last made", not "Made": the date outlives the shelf. A recipe queued up again sits
+  // on To Make still carrying the day it was last cooked, and that is worth reading.
+  //
+  // Built from the parts rather than new Date(iso). A bare YYYY-MM-DD is parsed as UTC
+  // midnight, so anywhere west of Greenwich it renders as the day before -- stamp a
+  // recipe in the evening and the card would call it yesterday.
+  function madeLabel(iso) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || '');
+    if (!m) return '';
+    const d = new Date(+m[1], +m[2] - 1, +m[3]);
+    const sameYear = d.getFullYear() === new Date().getFullYear();
+    return d.toLocaleDateString(undefined,
+      sameYear ? { month: 'short', day: 'numeric' }
+               : { month: 'short', day: 'numeric', year: 'numeric' });
+  }
+
   function cardHtml(r) {
     const ratingBadge = r.rating != null ? `<span class="pill">${r.rating}/10</span>` : '';
     const photoBadge = r.imageStatus === 'has-photo' ? '' : `<div class="no-photo-badge">No final photo yet</div>`;
+    const made = madeLabel(r.lastMade);
+    const madeBadge = made ? `<div class="last-made">Last made ${escapeHtml(made)}</div>` : '';
     return `
       <div class="rcard">
         <div class="rtitle" id="title-${r.id}">${escapeHtml(r.title)}</div>
         <div class="rmeta">${r.tags.map(t => `<span class="pill">${escapeHtml(t)}</span>`).join('')} ${ratingBadge}</div>
         ${photoBadge}
+        ${madeBadge}
         <div class="ractions">
           <select id="shelf-${r.id}">
             <option value="To Make" ${r.shelf === 'To Make' ? 'selected' : ''}>To Make</option>
@@ -795,13 +821,23 @@
       </div>`;
   }
 
+  // Landing on Made is the app's one reliable "I cooked this" signal, so that is where
+  // the date is stamped. Moving off Made and back again restamps it, which is exactly
+  // how a recipe cooked a second time gets its date refreshed; moving to To Make or
+  // Making leaves the old date alone, so a dish queued up again still shows when it was
+  // last actually eaten rather than going blank.
+  function stampMade(r) {
+    r.lastMade = new Date().toISOString().slice(0, 10);
+  }
+
   function moveShelf(id, newShelf) {
     const r = recipes.find(x => x.id === id);
     if (!r) return;
     if (newShelf === 'Made' && r.rating == null) {
-      showRatingModal(r, () => { r.shelf = 'Made'; save(recipes); renderShelves(); });
+      showRatingModal(r, () => { r.shelf = 'Made'; stampMade(r); save(recipes); renderShelves(); });
       return;
     }
+    if (newShelf === 'Made') stampMade(r);
     r.shelf = newShelf;
     save(recipes);
     renderShelves();
