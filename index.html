@@ -116,7 +116,11 @@
   }
   .pvimg {
     max-width: 100vw; max-height: 100vh; object-fit: contain;
-    transform-origin: 0 0; will-change: transform;
+    /* Pivots about the middle, which is what the viewer's arithmetic has always assumed:
+       clampPan treats a zero translation as centred and zoomTo keeps a point still by
+       measuring from the centre. Anchored at the corner instead, as this was, a zoom
+       grew the picture down and to the right and every zoom drifted off the middle. */
+    transform-origin: 50% 50%; will-change: transform;
     -webkit-user-drag: none; user-select: none;
   }
   .pvclose {
@@ -613,13 +617,26 @@
   const TRIM_MAX_FRACTION = 0.34;   // never take more than this much of one side
   const TRIM_MIN_FRACTION = 0.02;   // below this it is edge noise, not padding
 
-  function trimFlatBorder(canvas) {
-    const w = canvas.width, h = canvas.height;
-    if (w < 64 || h < 64) return canvas;
+  // Detection runs on a small probe copy rather than the full image: a 4000px phone photo
+  // is 48 MB of pixel data to pull out of a canvas, which is enough to stall an older
+  // tablet, and a flat band is just as obvious at a fraction of the size. The box comes
+  // back in source coordinates so the real crop can be taken at full resolution.
+  const TRIM_PROBE_DIM = 1000;
+
+  function trimBoxFor(img) {
+    const sw = img.width, sh = img.height;
+    const whole = { sx: 0, sy: 0, sw: sw, sh: sh, trimmed: null };
+    if (sw < 64 || sh < 64) return whole;
+
+    const k = Math.min(1, TRIM_PROBE_DIM / Math.max(sw, sh));
+    const w = Math.max(1, Math.round(sw * k)), h = Math.max(1, Math.round(sh * k));
+    const probe = document.createElement('canvas');
+    probe.width = w; probe.height = h;
+    probe.getContext('2d').drawImage(img, 0, 0, w, h);
     let data;
     // A canvas drawn from a cross-origin image is tainted and throws here. Nothing to
     // do about that, and an untrimmed photo is a perfectly good outcome.
-    try { data = canvas.getContext('2d').getImageData(0, 0, w, h).data; } catch (e) { return canvas; }
+    try { data = probe.getContext('2d').getImageData(0, 0, w, h).data; } catch (e) { return whole; }
 
     // A flat band is flat everywhere, so a couple of hundred samples along a line say
     // as much as walking every pixel of it and cost nothing on a phone.
@@ -654,22 +671,36 @@
 
     const top = scan(true, true), bottom = scan(true, false);
     const left = scan(false, true), right = scan(false, false);
-    const nw = w - left - right, nh = h - top - bottom;
-    if (nw < 64 || nh < 64) return canvas;
+    if (w - left - right < 32 || h - top - bottom < 32) return whole;
     // A line or two at an edge is compression noise, not padding worth acting on.
-    if ((top + bottom) < h * TRIM_MIN_FRACTION && (left + right) < w * TRIM_MIN_FRACTION) return canvas;
+    if ((top + bottom) < h * TRIM_MIN_FRACTION && (left + right) < w * TRIM_MIN_FRACTION) return whole;
 
-    const out = document.createElement('canvas');
-    out.width = nw; out.height = nh;
-    out.getContext('2d').drawImage(canvas, left, top, nw, nh, 0, 0, nw, nh);
-    out.trimmedBy = { top: top, bottom: bottom, left: left, right: right };
-    return out;
+    // Back to source pixels. The probe rounds, so the box is nudged inward by a pixel on
+    // each trimmed side: a sliver of the picture lost is invisible, whereas a sliver of
+    // the band left behind is a bright seam against the photo's border.
+    const up = (n, edge) => (n === 0 ? 0 : Math.min(edge, Math.ceil(n / k) + 1));
+    const t = up(top, sh), b = up(bottom, sh), l = up(left, sw), rr = up(right, sw);
+    const bw = sw - l - rr, bh = sh - t - b;
+    if (bw < 32 || bh < 32) return whole;
+    return { sx: l, sy: t, sw: bw, sh: bh, trimmed: { top: t, bottom: b, left: l, right: rr } };
   }
 
   // Phone cameras produce 3-8 MB files, and base64 inflates them by a third, which
   // overruns the ~5 MB localStorage budget for the whole site on the first photo.
-  // Downscale to a 1600px long edge and re-encode as JPEG before storing.
-  const MAX_IMAGE_DIM = 1600;
+  // Downscale and re-encode as JPEG before storing.
+  //
+  // A long-edge limit alone was the wrong shape of rule. What costs storage is pixels,
+  // and pixels are area: a 1600x1200 photo carries three times as many as a 1600x414
+  // plating strip, yet the strip was the one being cut short, capped at a width that
+  // left it unable to fill the page it was cropped wide for. So the long edge is allowed
+  // to run further once an image is genuinely stretched, and an area ceiling is what
+  // actually holds the line - it binds on every shape, and a strip pays for its width
+  // with the height it does not use.
+  const MAX_IMAGE_DIM = 1600;        // long edge for an ordinary photo
+  const MAX_WIDE_IMAGE_DIM = 3000;   // long edge once an image is at least WIDE_ASPECT
+  const WIDE_ASPECT = 2.5;
+  const MAX_IMAGE_PIXELS = 2.2e6;    // ~1600x1370, the real ceiling on what gets stored
+
   function readImageDownscaled(file, onDone, onError) {
     const reader = new FileReader();
     reader.onerror = () => onError("Couldn't read that file.");
@@ -677,18 +708,25 @@
       const img = new Image();
       img.onerror = () => onError("That file doesn't look like an image.");
       img.onload = () => {
-        const scale = Math.min(1, MAX_IMAGE_DIM / Math.max(img.width, img.height));
-        const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+        // Measured on the trimmed box, not the file as it arrived: a 21:9 image whose
+        // padding is about to come off is a 3.9:1 strip, and it is the strip that should
+        // decide how much width it is allowed.
+        const box = trimBoxFor(img);
+        const aspect = Math.max(box.sw / box.sh, box.sh / box.sw);
+        const dimCap = aspect >= WIDE_ASPECT ? MAX_WIDE_IMAGE_DIM : MAX_IMAGE_DIM;
+        let scale = Math.min(1, dimCap / Math.max(box.sw, box.sh));
+        const area = (box.sw * scale) * (box.sh * scale);
+        if (area > MAX_IMAGE_PIXELS) scale *= Math.sqrt(MAX_IMAGE_PIXELS / area);
+        const w = Math.max(1, Math.round(box.sw * scale)), h = Math.max(1, Math.round(box.sh * scale));
         const canvas = document.createElement('canvas');
         canvas.width = w; canvas.height = h;
-        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-        // Trim after the downscale rather than before it: the same border comes off
-        // either way, and this keeps the pixel scan small enough not to stall a phone.
-        const shot = trimFlatBorder(canvas);
-        const dataUrl = shot.toDataURL('image/jpeg', 0.82);
-        shot.toBlob(blob => {
+        // One draw does the crop and the downscale together, so the picture is resampled
+        // once from the original rather than twice through an intermediate canvas.
+        canvas.getContext('2d').drawImage(img, box.sx, box.sy, box.sw, box.sh, 0, 0, w, h);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+        canvas.toBlob(blob => {
           if (!blob) return onError("Couldn't process that image.");
-          onDone({ blob: blob, dataUrl: dataUrl, trimmedBy: shot.trimmedBy || null });
+          onDone({ blob: blob, dataUrl: dataUrl, trimmedBy: box.trimmed });
         }, 'image/jpeg', 0.82);
       };
       img.src = ev.target.result;
@@ -1152,6 +1190,31 @@
       apply();
     };
 
+    // Fitting the whole image on screen is the right opening move for a photo shaped
+    // roughly like the screen, but not for a plating strip: contained, a 3.9:1 image
+    // touches the side edges and leaves most of the height empty, so it opens barely
+    // larger than it already was on the page and tapping it appears to do nothing.
+    // A strip opens larger instead and pans sideways across the plates. Pinching out
+    // still returns the whole image, so nothing is hidden - only the starting point
+    // changes.
+    //
+    // How much larger is bounded by the picture itself. Filling the height blew a strip
+    // up past the pixels it actually has - bigger than anyone asked for, and softer than
+    // what was already on the page - so the opening zoom stops at 100% of the original.
+    // Every pixel shown once, as sharp as the photo gets. An image without the resolution
+    // to earn that opens fitted to the screen instead; it is never upscaled just to fill
+    // space. The cap above both is for the absurd case, a strip on a phone held upright.
+    const OPEN_FILL_CAP = 4;
+    const openingScale = () => {
+      if (!base || !base.height || !base.width) return 1;
+      const imageAspect = base.width / base.height;
+      const screenAspect = window.innerWidth / window.innerHeight;
+      if (imageAspect < screenAspect * 1.4) return 1;
+      const fillHeight = window.innerHeight / base.height;
+      const actualSize = (img.naturalWidth || base.width) / base.width;
+      return Math.max(1, Math.min(OPEN_FILL_CAP, MAX, fillHeight, actualSize));
+    };
+
     const measure = () => {
       // Reset before measuring, or the transform is baked into the numbers.
       const t = img.style.transform;
@@ -1159,7 +1222,18 @@
       base = img.getBoundingClientRect();
       img.style.transform = t;
     };
-    if (img.complete) setTimeout(measure, 0); else img.onload = measure;
+    // Goes through zoomTo rather than setting scale directly. The transform is anchored
+    // at the image's top-left corner, so a scale on its own grows the picture down and to
+    // the right and leaves it hanging off the corner of the screen; zoomTo already does
+    // the arithmetic that keeps a chosen point still, and opening is just that with the
+    // middle of the screen as the point.
+    const measureAndOpen = () => {
+      measure();
+      const s = openingScale();
+      if (s > 1) zoomTo(s, window.innerWidth / 2, window.innerHeight / 2);
+      else apply();
+    };
+    if (img.complete) setTimeout(measureAndOpen, 0); else img.onload = measureAndOpen;
     window.addEventListener('resize', measure);
 
     const pointers = new Map();
