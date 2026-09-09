@@ -84,8 +84,12 @@
     display: flex; align-items: flex-end; padding: clamp(12px,2.2vh,24px) clamp(16px,3vw,40px);
   }
   .photo-wrap { flex: 0 0 auto; padding: clamp(12px,2vh,18px) clamp(16px,3vw,40px) 0; }
+  /* Height is the only cap. The old 360px width cap meant a wide photo was shrunk to
+     fit it and came out shorter rather than spreading, so a plating strip could never
+     use the empty space beside it. Capping height alone lets a wide image run across
+     and keeps a tall one from taking over the page. */
   .recipe-photo {
-    display: block; max-width: min(100%, 360px); max-height: 40vh;
+    display: block; max-width: 100%; max-height: 40vh;
     width: auto; height: auto; object-fit: contain;
     border-radius: 8px; border: 1px solid var(--border);
   }
