@@ -598,6 +598,74 @@
     input.click();
   }
 
+  // A generated plating image arrives padded: the picture is 21:9, but the food sits in
+  // a band across the middle with flat filler above and below. Uploaded as it comes,
+  // that filler renders as a slab of the wrong colour inside the photo's own border and
+  // the dish reads as small and stranded. Trimming it here is what lets a paste be the
+  // whole workflow, with no image editor in the middle.
+  //
+  // Deliberately timid. It only takes a border that is genuinely flat right across the
+  // image, and it gives up rather than eat more than a third of a side, so a real photo
+  // shot against a plain wall or a white backdrop keeps its framing. When it is unsure
+  // it does nothing, because a photo left slightly padded is a much smaller problem than
+  // one quietly cropped into.
+  const TRIM_FLATNESS = 4.0;        // mean channel deviation along a line still called flat
+  const TRIM_MAX_FRACTION = 0.34;   // never take more than this much of one side
+  const TRIM_MIN_FRACTION = 0.02;   // below this it is edge noise, not padding
+
+  function trimFlatBorder(canvas) {
+    const w = canvas.width, h = canvas.height;
+    if (w < 64 || h < 64) return canvas;
+    let data;
+    // A canvas drawn from a cross-origin image is tainted and throws here. Nothing to
+    // do about that, and an untrimmed photo is a perfectly good outcome.
+    try { data = canvas.getContext('2d').getImageData(0, 0, w, h).data; } catch (e) { return canvas; }
+
+    // A flat band is flat everywhere, so a couple of hundred samples along a line say
+    // as much as walking every pixel of it and cost nothing on a phone.
+    function flatness(n, horizontal) {
+      const len = horizontal ? w : h;
+      const step = Math.max(1, Math.floor(len / 200));
+      const px = [];
+      for (let i = 0; i < len; i += step) {
+        const x = horizontal ? i : n, y = horizontal ? n : i;
+        const o = (y * w + x) * 4;
+        px.push([data[o], data[o + 1], data[o + 2]]);
+      }
+      const mean = [0, 1, 2].map(c => px.reduce((s, p) => s + p[c], 0) / px.length);
+      let dev = 0;
+      px.forEach(p => { dev += ([0, 1, 2].reduce((s, c) => s + Math.abs(p[c] - mean[c]), 0)) / 3; });
+      return dev / px.length;
+    }
+
+    // Walks in from an edge while the lines stay flat. A generated band usually fades
+    // into the picture through a soft ramp; every line of that ramp is still flat, so it
+    // comes away with the band instead of being left behind as a seam of the wrong grey.
+    function scan(horizontal, fromStart) {
+      const len = horizontal ? h : w;
+      const limit = Math.floor(len * TRIM_MAX_FRACTION);
+      let n = 0;
+      for (let k = 0; k < limit; k++) {
+        if (flatness(fromStart ? k : len - 1 - k, horizontal) > TRIM_FLATNESS) break;
+        n = k + 1;
+      }
+      return n;
+    }
+
+    const top = scan(true, true), bottom = scan(true, false);
+    const left = scan(false, true), right = scan(false, false);
+    const nw = w - left - right, nh = h - top - bottom;
+    if (nw < 64 || nh < 64) return canvas;
+    // A line or two at an edge is compression noise, not padding worth acting on.
+    if ((top + bottom) < h * TRIM_MIN_FRACTION && (left + right) < w * TRIM_MIN_FRACTION) return canvas;
+
+    const out = document.createElement('canvas');
+    out.width = nw; out.height = nh;
+    out.getContext('2d').drawImage(canvas, left, top, nw, nh, 0, 0, nw, nh);
+    out.trimmedBy = { top: top, bottom: bottom, left: left, right: right };
+    return out;
+  }
+
   // Phone cameras produce 3-8 MB files, and base64 inflates them by a third, which
   // overruns the ~5 MB localStorage budget for the whole site on the first photo.
   // Downscale to a 1600px long edge and re-encode as JPEG before storing.
@@ -614,10 +682,13 @@
         const canvas = document.createElement('canvas');
         canvas.width = w; canvas.height = h;
         canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
-        canvas.toBlob(blob => {
+        // Trim after the downscale rather than before it: the same border comes off
+        // either way, and this keeps the pixel scan small enough not to stall a phone.
+        const shot = trimFlatBorder(canvas);
+        const dataUrl = shot.toDataURL('image/jpeg', 0.82);
+        shot.toBlob(blob => {
           if (!blob) return onError("Couldn't process that image.");
-          onDone({ blob: blob, dataUrl: dataUrl });
+          onDone({ blob: blob, dataUrl: dataUrl, trimmedBy: shot.trimmedBy || null });
         }, 'image/jpeg', 0.82);
       };
       img.src = ev.target.result;
