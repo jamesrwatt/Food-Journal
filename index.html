@@ -613,9 +613,20 @@
   // shot against a plain wall or a white backdrop keeps its framing. When it is unsure
   // it does nothing, because a photo left slightly padded is a much smaller problem than
   // one quietly cropped into.
-  const TRIM_FLATNESS = 4.0;        // mean channel deviation along a line still called flat
+  // 4.0 was too generous. Filler generated as padding sits near 0.2 to 1.8, but a real
+  // surface photographed as background - marble especially - runs from 4 to 9 as the
+  // veining drifts in and out, so the threshold sat inside the range of an actual
+  // countertop. A strip shot on marble had 366px taken off the top, where the stone
+  // happened to be plain, and nothing off the bottom, where it happened to be veined:
+  // the plates ended up 101px above centre in a picture composed around them.
+  const TRIM_FLATNESS = 2.5;        // mean channel deviation along a line still called flat
   const TRIM_MAX_FRACTION = 0.34;   // never take more than this much of one side
   const TRIM_MIN_FRACTION = 0.02;   // below this it is edge noise, not padding
+  // Padding is put on in roughly equal measure, so a crop that takes far more from one
+  // end than the other is not padding coming off - it is the background being eaten
+  // unevenly, and it drags a centred composition off centre. Past this much disagreement
+  // between the two ends of an axis, only the part they agree on is taken.
+  const TRIM_LOPSIDED = 0.15;
 
   // Detection runs on a small probe copy rather than the full image: a 4000px phone photo
   // is 48 MB of pixel data to pull out of a canvas, which is enough to stall an older
@@ -669,8 +680,11 @@
       return n;
     }
 
-    const top = scan(true, true), bottom = scan(true, false);
-    const left = scan(false, true), right = scan(false, false);
+    let top = scan(true, true), bottom = scan(true, false);
+    let left = scan(false, true), right = scan(false, false);
+    // Keep the middle of the picture in the middle of the crop.
+    if (Math.abs(top - bottom) > h * TRIM_LOPSIDED) { top = bottom = Math.min(top, bottom); }
+    if (Math.abs(left - right) > w * TRIM_LOPSIDED) { left = right = Math.min(left, right); }
     if (w - left - right < 32 || h - top - bottom < 32) return whole;
     // A line or two at an edge is compression noise, not padding worth acting on.
     if ((top + bottom) < h * TRIM_MIN_FRACTION && (left + right) < w * TRIM_MIN_FRACTION) return whole;
