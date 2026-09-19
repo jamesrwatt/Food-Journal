@@ -134,6 +134,56 @@
     pointer-events: none; transition: opacity 0.4s;
   }
 
+  /* ---- Full-screen reading view (ingredients / instructions / notes) ---- */
+  /* A section of the card is its own tap target, matching the photo: the two things you
+     look at across a kitchen are the picture and the words. */
+  .zone { cursor: zoom-in; border-radius: 8px; padding: 2px 6px; margin: 0 -6px; }
+  @media (hover: hover) { .zone:hover { background: rgba(185,141,94,0.10); } }
+  .zone:focus-visible { outline: 2px solid var(--brown); outline-offset: 2px; }
+  /* The photo viewer scales pixels; this scales type, so lines re-wrap and nothing has
+     to be panned sideways to be read. Same paper as the card, not a black scrim. */
+  /* Two classes, because this rule sits above .overlay and has to beat its scrim. */
+  .overlay.textviewer {
+    display: block; background: var(--bg); z-index: 60;
+    overflow-y: auto; overscroll-behavior: contain;
+    /* Vertical scroll stays with the browser; the pinch is handled here. */
+    touch-action: pan-y; user-select: none;
+  }
+  .tvinner {
+    --tvbase: clamp(1rem, 1.55vw + 0.45rem, 1.6rem);
+    padding: clamp(16px,3vh,32px) clamp(18px,4vw,60px) clamp(64px,9vh,96px);
+    font-size: calc(var(--tvs, 1) * var(--tvbase));
+  }
+  .tvinner h2 {
+    font-size: 1.05em; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--muted); margin: 0 0 0.6em; border-bottom: 2px solid var(--brown);
+    padding-bottom: 0.25em;
+  }
+  .tvinner ul, .tvinner ol { margin: 0; padding-left: 1.1em; font-size: 1em; line-height: 1.55; }
+  .tvinner ul { list-style: none; padding-left: 0; }
+  .tvinner li { padding: 0.35em 0; }
+  .tvinner ul li { border-bottom: 1px dotted var(--border); }
+  .tvinner .notes { font-size: 1em; line-height: 1.55; white-space: pre-wrap; color: var(--text); }
+  .tvclose, .tvzoom button {
+    width: 44px; height: 44px; border-radius: 22px; padding: 0;
+    font-size: 1.2rem; line-height: 1; border: 1px solid var(--border);
+    background: rgba(255,255,255,0.92); color: var(--text);
+  }
+  .tvclose { position: fixed; top: max(10px, env(safe-area-inset-top)); right: 12px; z-index: 2; }
+  .tvzoom {
+    position: fixed; top: max(10px, env(safe-area-inset-top)); right: 68px; z-index: 2;
+    display: flex; gap: 8px;
+  }
+  /* On a phone the controls sit over the first line, so the text starts below them. */
+  @media (max-width: 600px) {
+    .tvinner { padding-top: clamp(62px, 9vh, 78px); }
+  }
+  .tvhint {
+    position: fixed; bottom: max(12px, env(safe-area-inset-bottom)); left: 0; right: 0;
+    text-align: center; color: var(--muted); font-size: 0.8rem;
+    pointer-events: none; transition: opacity 0.4s;
+  }
+
   /* ---- URL import ---- */
   .importrow { display: flex; gap: 8px; align-items: center; }
   .importrow input { flex: 1 1 auto; margin: 0; }
@@ -1342,6 +1392,122 @@
     return close;
   }
 
+  // Full-screen reading view for one section of a recipe. Deliberately not the photo
+  // viewer's approach: scaling a block of text with a transform means panning left and
+  // right to read every line, so this scales the font instead and lets the lines re-wrap.
+  // The size it opens at is the largest that still shows the whole section at once —
+  // "full screen" for text means filling it, not magnifying past the edges.
+  function openTextViewer(sourceEl) {
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay textviewer';
+    overlay.innerHTML = `
+      <button class="tvclose" id="tvClose" aria-label="Close reading view">&#10005;</button>
+      <div class="tvzoom">
+        <button id="tvOut" aria-label="Smaller text">&minus;</button>
+        <button id="tvIn" aria-label="Bigger text">+</button>
+      </div>
+      <div class="tvinner" id="tvInner"></div>
+      <div class="tvhint" id="tvHint">Pinch, double-tap or use &minus;/+ to resize &middot; &#10005; or Esc to close</div>`;
+    document.body.appendChild(overlay);
+
+    const inner = overlay.querySelector('#tvInner');
+    const hint = overlay.querySelector('#tvHint');
+    // Already-escaped markup from the card, copied rather than rebuilt so the two views
+    // can never drift apart.
+    inner.innerHTML = sourceEl.innerHTML;
+
+    const MIN = 0.8, MAX = 3.2;
+    let scale = 1, fitted = 1;
+    const apply = () => overlay.style.setProperty('--tvs', scale);
+    const clamp = v => Math.min(MAX, Math.max(MIN, v));
+
+    // Binary search rather than arithmetic: wrapping makes height a step function of the
+    // font size, so there is nothing to solve for. Never goes below 1 — a long method
+    // scrolls instead of being shrunk, which is the wrong trade in a kitchen.
+    const fit = () => {
+      const fits = () => inner.scrollHeight <= overlay.clientHeight + 1;
+      scale = MAX; apply();
+      if (!fits()) {
+        let lo = 1, hi = MAX;
+        for (let i = 0; i < 14; i++) {
+          scale = (lo + hi) / 2; apply();
+          if (fits()) lo = scale; else hi = scale;
+        }
+        scale = lo; apply();
+      }
+      fitted = scale;
+    };
+
+    const bump = d => { scale = clamp(scale + d); apply(); };
+    // Double-tap swings between the fitted size and a step larger, so one gesture gets
+    // you from "the whole thing" to "the line I am on" and back.
+    const toggle = () => { scale = Math.abs(scale - fitted) < 0.05 ? clamp(fitted + 0.6) : fitted; apply(); };
+
+    const close = () => {
+      window.removeEventListener('resize', fit);
+      document.removeEventListener('keydown', onKey);
+      if (overlay.parentNode) document.body.removeChild(overlay);
+    };
+    const onKey = e => {
+      if (e.key === 'Escape') close();
+      else if (e.key === '+' || e.key === '=') bump(0.15);
+      else if (e.key === '-') bump(-0.15);
+      else if (e.key === '0') fit();
+    };
+    document.addEventListener('keydown', onKey);
+    window.addEventListener('resize', fit);
+    overlay.querySelector('#tvClose').onclick = close;
+    overlay.querySelector('#tvIn').onclick = () => bump(0.15);
+    overlay.querySelector('#tvOut').onclick = () => bump(-0.15);
+    // Only the margin outside the text closes on a tap; tapping the words themselves
+    // must not dismiss what you are reading.
+    overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+    overlay.addEventListener('dblclick', toggle);
+
+    // Ctrl/Cmd+wheel resizes. A plain wheel is left to the browser so a long section
+    // still scrolls the way everything else does.
+    overlay.addEventListener('wheel', e => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      bump(e.deltaY < 0 ? 0.1 : -0.1);
+    }, { passive: false });
+
+    // Pinch, on the same two-pointer bookkeeping the photo viewer uses.
+    const pts = new Map();
+    let pinchStart = 0, scaleStart = 1;
+    const spread = () => {
+      const v = [...pts.values()];
+      return Math.hypot(v[0].x - v[1].x, v[0].y - v[1].y);
+    };
+    overlay.addEventListener('pointerdown', e => {
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pts.size === 2) { pinchStart = spread(); scaleStart = scale; }
+    });
+    overlay.addEventListener('pointermove', e => {
+      if (!pts.has(e.pointerId)) return;
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pts.size === 2 && pinchStart) { scale = clamp(scaleStart * (spread() / pinchStart)); apply(); }
+    });
+    let lastTap = 0;
+    const drop = e => {
+      const wasPinching = pts.size === 2;
+      pts.delete(e.pointerId);
+      if (pts.size < 2) pinchStart = 0;
+      // Touch has no dblclick worth relying on here, and a tap that ended a pinch is not
+      // a tap — counting it would throw away the size the pinch just set.
+      if (e.pointerType !== 'mouse' && !wasPinching && pts.size === 0) {
+        const now = Date.now();
+        if (now - lastTap < 320) { toggle(); lastTap = 0; } else lastTap = now;
+      }
+    };
+    overlay.addEventListener('pointerup', drop);
+    overlay.addEventListener('pointercancel', drop);
+
+    requestAnimationFrame(fit);
+    setTimeout(() => { hint.style.opacity = '0'; }, 2600);
+    return close;
+  }
+
   // Copying an image straight off a web page beats saving it to the photo library and
   // hunting for it afterwards, which is the whole point on a tablet.
   //
@@ -1554,13 +1720,19 @@
         </div>
         <div class="content-grid">
           <div class="col">
-            <h2>Ingredients</h2>
-            <ul>${r.ingredients.map(i => `<li>${escapeHtml(i)}</li>`).join('')}</ul>
+            <div class="zone" role="button" tabindex="0" title="Tap to read full screen">
+              <h2>Ingredients</h2>
+              <ul>${r.ingredients.map(i => `<li>${escapeHtml(i)}</li>`).join('')}</ul>
+            </div>
           </div>
           <div class="col">
-            <h2>Instructions</h2>
-            <ol>${r.instructions.map(i => `<li>${escapeHtml(i)}</li>`).join('')}</ol>
-            ${r.notes ? `<h2 style="margin-top:18px;">Notes</h2><div class="notes">${escapeHtml(r.notes)}</div>` : ''}
+            <div class="zone" role="button" tabindex="0" title="Tap to read full screen">
+              <h2>Instructions</h2>
+              <ol>${r.instructions.map(i => `<li>${escapeHtml(i)}</li>`).join('')}</ol>
+            </div>
+            ${r.notes ? `<div class="zone" role="button" tabindex="0" title="Tap to read full screen" style="margin-top:18px;">
+              <h2>Notes</h2><div class="notes">${escapeHtml(r.notes)}</div>
+            </div>` : ''}
           </div>
         </div>
       </div>`;
@@ -1569,6 +1741,13 @@
     document.getElementById('rateBtn').onclick = () => showRatingModal(r, () => renderDetail());
     document.getElementById('deleteBtn').onclick = () => confirmDeleteModal(r);
     document.getElementById('editBtn').onclick = () => { view.mode = 'form'; view.editId = r.id; render(); };
+    // Each section reads full screen on its own, the way the photo does.
+    app.querySelectorAll('.zone').forEach(z => {
+      z.onclick = () => openTextViewer(z);
+      z.onkeydown = e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openTextViewer(z); }
+      };
+    });
     const photoEl = app.querySelector('.recipe-photo');
     if (photoEl) {
       const openIt = () => openPhotoViewer(r.image, r.title);
