@@ -278,7 +278,7 @@
   const PHOTO_BUCKET = 'recipe-photos';
   const POLL_MS = 30000;
   const PROFILE_KEY = 'foodJournalProfile';
-  const PROFILE_FIELDS = ['shelf', 'rating', 'hidden', 'nextPhotoPromptAt', 'lastMade'];
+  const PROFILE_FIELDS = ['shelf', 'rating', 'hidden', 'nextPhotoPromptAt', 'lastMade', 'shelfChangedAt'];
 
   let profile = null;            // { id, name, isAdmin } — whose journal this device shows
   let allProfiles = [];
@@ -378,7 +378,8 @@
         rating: (typeof r.rating === 'number') ? r.rating : null,
         hidden: !!r.hidden,
         next_photo_prompt_at: (typeof r.nextPhotoPromptAt === 'number') ? r.nextPhotoPromptAt : null,
-        last_made: r.lastMade || null
+        last_made: r.lastMade || null,
+        shelf_changed_at: r.shelfChangedAt || null
       })), 'profile_id,recipe_id'));
     }
     return Promise.all(jobs)
@@ -467,7 +468,10 @@
             // Reading it as null would erase a date this device just stamped, so an
             // absent column falls back to what is already here; only a row that
             // actually carries the field is allowed to clear it.
-            lastMade: (s && 'last_made' in s) ? s.last_made : (base.lastMade || null)
+            lastMade: (s && 'last_made' in s) ? s.last_made : (base.lastMade || null),
+            // Same reasoning as last_made: a row from a device on older code has no such
+            // key, and reading that as null would throw away a stamp made here.
+            shelfChangedAt: (s && 'shelf_changed_at' in s) ? s.shelf_changed_at : (base.shelfChangedAt || null)
           });
         };
 
@@ -588,7 +592,8 @@
       headers: sbHeaders({ 'Content-Type': 'application/json', 'Prefer': 'return=minimal,resolution=ignore-duplicates' }),
       body: JSON.stringify([{
         profile_id: targetId, recipe_id: recipe.id,
-        shelf: 'To Make', rating: null, hidden: false
+        shelf: 'To Make', rating: null, hidden: false,
+        shelf_changed_at: new Date().toISOString()
       }])
     }).then(res => {
       if (!res.ok && res.status !== 409) throw new Error('send ' + res.status);
@@ -944,7 +949,7 @@
     const cols = document.getElementById('boardCols');
     if (!cols) return;
     cols.innerHTML = shelves.map(shelf => {
-      const items = filtered.filter(r => r.shelf === shelf);
+      const items = filtered.filter(r => r.shelf === shelf).sort(byShelfPosition);
       return `
         <div class="column">
           <div class="column-head">${shelf} (${items.length})</div>
@@ -1007,17 +1012,50 @@
     r.lastMade = new Date().toISOString().slice(0, 10);
   }
 
+  // Records when a recipe arrived where it now sits, which is what the board sorts on.
+  // A full timestamp rather than lastMade's plain date: several recipes added on one
+  // afternoon need to keep the order they were added in, and a date cannot say that.
+  function stampShelf(r) {
+    r.shelfChangedAt = new Date().toISOString();
+  }
+
   function moveShelf(id, newShelf) {
     const r = recipes.find(x => x.id === id);
     if (!r) return;
     if (newShelf === 'Made' && r.rating == null) {
-      showRatingModal(r, () => { r.shelf = 'Made'; stampMade(r); save(recipes); renderShelves(); });
+      showRatingModal(r, () => {
+        r.shelf = 'Made'; stampMade(r); stampShelf(r); save(recipes); renderShelves();
+      });
       return;
     }
     if (newShelf === 'Made') stampMade(r);
+    stampShelf(r);
     r.shelf = newShelf;
     save(recipes);
     renderShelves();
+  }
+
+  // Oldest at the top, whatever landed most recently at the bottom, so each shelf reads
+  // as a queue you work down.
+  //
+  // Three sources, in descending order of how well they answer "when did this get here".
+  // shelfChangedAt is the real answer and is stamped on every move. lastMade covers a
+  // recipe moved to Made before that stamp existed. dateAdded is the shared recipe's own
+  // creation date, which is what every recipe predating both falls back to - it is a real
+  // date and it orders the existing board sensibly, so nothing had to be invented for the
+  // rows already out there.
+  //
+  // Title breaks ties. Recipes added on the same day share a dateAdded, and without a
+  // tie-break their order would follow the array, which sync rearranges - cards would
+  // quietly swap places between polls.
+  function shelfOrder(r) {
+    const when = r.shelfChangedAt || r.lastMade || r.dateAdded;
+    const t = when ? Date.parse(when) : NaN;
+    return isNaN(t) ? 0 : t;
+  }
+
+  function byShelfPosition(a, b) {
+    return shelfOrder(a) - shelfOrder(b) || a.title.localeCompare(b.title);
   }
 
   function showRatingModal(r, onDone) {
@@ -1153,20 +1191,22 @@
 
   function maybeShowPhotoPrompt(r) {
     if (r.imageStatus === 'has-photo' || r.imageStatus === 'ai-pending') return;
+    // Nothing in this build sets a snooze -- the 30 and 60 minute options were removed
+    // because recipes get added in batches and the reminder was never the useful answer.
+    // The check stays because a device still running older code can push one, and
+    // honouring it costs nothing.
     if (r.nextPhotoPromptAt && Date.now() < r.nextPhotoPromptAt) return;
     const overlay = document.createElement('div');
     overlay.className = 'overlay';
     overlay.innerHTML = `
       <div class="modal">
         <h3>Add a photo?</h3>
-        <div>This recipe doesn't have a final photo yet. Upload one now, or remind me later?</div>
+        <div>This recipe doesn't have a final photo yet. Add one now, or skip?</div>
         <div class="opts">
           <button id="photoTake">Take Photo</button>
           <button id="photoChoose">Choose Existing</button>
           <button id="photoPaste">Paste Photo</button>
           ${r.sourceImages && r.sourceImages.length ? `<button id="photoSource">From Recipe's Page</button>` : ''}
-          <button id="photo30" class="secondary">In 30 min</button>
-          <button id="photo60" class="secondary">In 60 min</button>
           <button id="photoSkip" class="secondary">Skip</button>
         </div>
         <input type="file" id="photoFile" accept="image/*" class="hidden" style="margin-top:10px;">
@@ -1184,14 +1224,6 @@
       readImageDownscaled(file, shot => {
         applyPhoto(r, shot, () => { close(); renderDetail(); }, m => alert(m));
       }, msg => alert(msg));
-    };
-    document.getElementById('photo30').onclick = () => {
-      r.nextPhotoPromptAt = Date.now() + 30 * 60 * 1000;
-      save(recipes); close();
-    };
-    document.getElementById('photo60').onclick = () => {
-      r.nextPhotoPromptAt = Date.now() + 60 * 60 * 1000;
-      save(recipes); close();
     };
     document.getElementById('photoSkip').onclick = () => {
       r.imageStatus = 'ai-pending';
@@ -1908,6 +1940,7 @@
         image: null,
         imageStatus: 'pending',
         nextPhotoPromptAt: null,
+        shelfChangedAt: new Date().toISOString(),
         dateAdded: new Date().toISOString().slice(0, 10)
       });
       if (pendingImport.source) rec.source = pendingImport.source;
