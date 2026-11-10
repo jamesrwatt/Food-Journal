@@ -21,8 +21,14 @@ import { withSupabase } from "jsr:@supabase/server@^1";
 const BUCKET = "recipe-photos";
 
 // Overridable without touching this file, because model names move and a rename should
-// not need a code change to fix.
-const MODEL = Deno.env.get("GEMINI_IMAGE_MODEL") || "gemini-2.5-flash-image";
+// not need a code change to fix. That override has already earned itself: the model this
+// was written against, gemini-2.5-flash-image, was deprecated with a shutdown date of
+// 2027-03-15, and the default moved here before it was ever used in anger.
+//
+// Neither model has been exercised against a live key - image generation is not offered
+// on the free tier at all - so this points at the one with a future rather than the one
+// that was verified, because neither was.
+const MODEL = Deno.env.get("GEMINI_IMAGE_MODEL") || "gemini-3.1-flash-lite-image";
 const GEMINI_TIMEOUT_MS = 90_000;
 const MAX_IMAGE_BYTES = 8_000_000;
 
