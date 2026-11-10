@@ -1260,46 +1260,18 @@
     render();
   }
 
-  function maybeShowPhotoPrompt(r) {
-    // This asks for a photo of what was cooked, never for a plating strip: the plating
-    // one generates itself and nobody needs prompting for it.
-    if (r.personalImage || r.personalSkipped) return;
-    // Nothing in this build sets a snooze -- the 30 and 60 minute options were removed
-    // because recipes get added in batches and the reminder was never the useful answer.
-    // The check stays because a device still running older code can push one, and
-    // honouring it costs nothing.
-    if (r.nextPhotoPromptAt && Date.now() < r.nextPhotoPromptAt) return;
-    const overlay = document.createElement('div');
-    overlay.className = 'overlay';
-    overlay.innerHTML = `
-      <div class="modal">
-        <h3>Add a photo?</h3>
-        <div>There's no photo of the one you made yet. Add one now, or skip?</div>
-        <div class="opts">
-          <button id="photoTake">Take Photo</button>
-          <button id="photoChoose">Choose Existing</button>
-          <button id="photoSkip" class="secondary">Skip</button>
-        </div>
-        <input type="file" id="photoFile" accept="image/*" class="hidden" style="margin-top:10px;">
-      </div>`;
-    document.body.appendChild(overlay);
-    const close = () => document.body.removeChild(overlay);
-    document.getElementById('photoTake').onclick = () => pickImage(document.getElementById('photoFile'), true);
-    document.getElementById('photoChoose').onclick = () => pickImage(document.getElementById('photoFile'), false);
-    document.getElementById('photoFile').onchange = e => {
-      const file = e.target.files[0];
-      if (!file) return;
-      readImageDownscaled(file, shot => {
-        applyPhoto(r, shot, () => { close(); renderDetail(); }, m => alert(m), 'personal');
-      }, msg => alert(msg));
-    };
-    document.getElementById('photoSkip').onclick = () => {
-      r.personalSkipped = true;
-      r.nextPhotoPromptAt = null;
-      save(recipes); close();
-      renderDetail();
-    };
-  }
+  // There is deliberately no automatic photo prompt, and this note is here so one does
+  // not get added back.
+  //
+  // It used to fire whenever a recipe without a photo was opened, which meant it asked
+  // at both the moments it made least sense: on To Make, where the dish has not been
+  // cooked and there is nothing to photograph, and on Made, where it piled a second
+  // dialog on top of the rating prompt and then nagged again every time the recipe was
+  // reopened to read it.
+  //
+  // The moment that does carry a question is a recipe reaching Made, and the question
+  // worth asking there is how it was - which moveShelf already asks. A photo is added
+  // when there is one to add, from the Add My Photo button.
 
   // Full-screen photo viewer. Worth the pointer-event handling rather than leaning on the
   // browser: pinch-zoom on a page does not work usefully inside a fixed overlay, and the
@@ -1956,7 +1928,6 @@
     if (sendBtn) sendBtn.onclick = () => showSendModal(r);
     document.getElementById('platingPhotoBtn').onclick = () => openPlatingPhotoModal(r);
     document.getElementById('personalPhotoBtn').onclick = () => openPersonalPhotoModal(r);
-    maybeShowPhotoPrompt(r);
   }
 
   function renderForm() {
