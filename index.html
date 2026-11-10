@@ -1089,17 +1089,32 @@
   function moveShelf(id, newShelf) {
     const r = recipes.find(x => x.id === id);
     if (!r) return;
+
+    // Reaching Made is the one moment the app can be sure the dish was actually cooked,
+    // which makes it the only moment worth asking anything. Two questions follow from
+    // it, in the order they can be answered: how was it, and is there a picture. The
+    // photo is asked second because the rating is a tap and the camera is an errand.
+    //
+    // Asked here and nowhere else. The prompt that used to fire on opening a recipe was
+    // removed precisely because it asked when there was nothing to give.
+    const finishMove = () => {
+      if (newShelf === 'Made') stampMade(r);
+      stampShelf(r);
+      r.shelf = newShelf;
+      save(recipes);
+      renderShelves();
+      if (newShelf === 'Made' && !r.personalImage) {
+        openPersonalPhotoModal(r, () => renderShelves());
+      }
+    };
+
     if (newShelf === 'Made' && r.rating == null) {
-      showRatingModal(r, () => {
-        r.shelf = 'Made'; stampMade(r); stampShelf(r); save(recipes); renderShelves();
-      });
+      // Cancelling the rating still lands the move, and still leads to the photo: both
+      // questions are optional, and neither should hold the shelf change hostage.
+      showRatingModal(r, finishMove);
       return;
     }
-    if (newShelf === 'Made') stampMade(r);
-    stampShelf(r);
-    r.shelf = newShelf;
-    save(recipes);
-    renderShelves();
+    finishMove();
   }
 
   // Oldest at the top, whatever landed most recently at the bottom, so each shelf reads
@@ -1774,7 +1789,7 @@
     document.getElementById('platingCancel').onclick = close;
   }
 
-  function openPersonalPhotoModal(r) {
+  function openPersonalPhotoModal(r, after) {
     const has = !!r.personalImage;
     const overlay = document.createElement('div');
     overlay.className = 'overlay';
@@ -1795,11 +1810,12 @@
     const close = () => { if (overlay.parentNode) document.body.removeChild(overlay); };
     document.getElementById('personalTake').onclick = () => pickImage(document.getElementById('personalFile'), true);
     document.getElementById('personalChoose').onclick = () => pickImage(document.getElementById('personalFile'), false);
+    const done = after || (() => renderDetail());
     document.getElementById('personalFile').onchange = e => {
       const file = e.target.files[0];
       if (!file) return;
       readImageDownscaled(file,
-        shot => applyPhoto(r, shot, () => { close(); renderDetail(); }, m => alert(m), 'personal'),
+        shot => applyPhoto(r, shot, () => { close(); done(); }, m => alert(m), 'personal'),
         m => alert(m));
     };
     document.getElementById('personalCancel').onclick = close;
