@@ -62,26 +62,28 @@ function assertSlug(id: unknown): string {
   return id;
 }
 
-// The wording here is the prompt James arrived at over several rounds with Gemini, and
-// it is kept rather than improved on. Two details in it are load-bearing: one continuous
-// background, so the strip reads as five plates on a counter rather than five pasted
-// photographs, and plates centred with even margin, because an off-centre strip cannot
-// be rescued afterwards - the app's trim only removes flat filler and deliberately will
-// not touch a photographed surface.
+// This is James's own prompt, arrived at over several rounds with Gemini and kept word
+// for word rather than improved on. Three parts of it are load-bearing and should not be
+// tidied away: no deconstruction, which is what a model reaches for when told "fine
+// dining" and is not what anyone wants to eat; one continuous background, so the strip
+// reads as five plates on a counter rather than five photographs pasted together; and
+// plates filling the frame, because the app's trim only removes flat filler and
+// deliberately will not crop a photographed surface like marble - whatever margin the
+// model leaves is margin that stays.
 function buildPrompt(title: string, tags: string[], ingredients: string[]) {
   const context = ingredients.length
     ? ` The dish is made with ${ingredients.slice(0, 12).join(", ")}.`
     : "";
   const kind = tags.length ? ` It is a ${tags.join(" / ").toLowerCase()}.` : "";
   return [
-    "Generate a 2k output ultra-wide 21:9 horizontal strip showing five unique fine dining",
+    "Generate a 2k output ultra-wide 3.9:1 horizontal strip showing five unique fine dining",
     `plating presentations of "${title.trim()}", arranged in one single row, evenly spaced,`,
     `all at identical scale and shot from the same three-quarter overhead angle.${kind}${context}`,
-    "Clean neutral surfaces - pale linen, slate, matte ceramic. Restaurant food photography,",
-    "soft diffused daylight from the left, shallow depth of field. No text, no labels, no",
-    "borders or dividing lines between the plates. Make it one background like it is 5 plates",
-    "side by side on a marble countertop. Keep the plates vertically centered with even",
-    "margin above and below.",
+    "I don't like the deconstruction style of plating. Clean neutral surfaces - pale linen,",
+    "slate, matte ceramic. Restaurant food photography, soft diffused daylight from the left,",
+    "shallow depth of field. No text, no labels, no borders or dividing lines between the",
+    "plates. Make it one background like it's 5 plates side by side on a marble countertop.",
+    "Keep the plates filling the frame vertically, minimal margin above and below.",
   ].join(" ");
 }
 
