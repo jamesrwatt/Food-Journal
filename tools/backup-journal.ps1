@@ -30,6 +30,14 @@ $ErrorActionPreference = 'Stop'
 
 $SupabaseUrl = 'https://uhicczuwqolnowonqwfq.supabase.co'
 $PublishableKey = 'sb_publishable_SlLvi4eVDROg3pEfiI1xfg_aUhr6I0u'
+# A recipe carries two pictures in two buckets: the AI plating strip, and the photo of
+# what was actually cooked. Each is saved into its own folder and checked against the
+# field that references it. The personal bucket may not exist yet, which is not a
+# failure - there is simply nothing of that kind to save.
+$Buckets = @(
+    [ordered]@{ Name = 'recipe-photos';   Field = 'image';         Folder = 'photos' },
+    [ordered]@{ Name = 'personal-photos'; Field = 'personalImage'; Folder = 'photos-personal' }
+)
 $Bucket = 'recipe-photos'
 
 $headers = @{ apikey = $PublishableKey; Authorization = "Bearer $PublishableKey" }
@@ -80,48 +88,78 @@ foreach ($r in ($live | Sort-Object { $_.data.title })) {
 [IO.File]::WriteAllText((Join-Path $out 'recipes.txt'), $txt.ToString(), [Text.Encoding]::UTF8)
 
 # ---- Photos ------------------------------------------------------------------
-$listUri = "$SupabaseUrl/storage/v1/object/list/$Bucket"
-$listResp = Invoke-WebRequest -Uri $listUri -Headers $headers -Method POST -ContentType 'application/json' -Body '{"prefix":"","limit":1000}' -UseBasicParsing -TimeoutSec 60
-$listed = $listResp.Content | ConvertFrom-Json
-$objects = @($listed | Where-Object { $_.name -and -not $_.name.StartsWith('.') })
-Write-Host ("  bucket : {0} entries listed, {1} are photos" -f $listed.Count, $objects.Count)
-
-# A backup that quietly saves no photos is worse than one that fails, because it looks
-# like it worked. If the table references photos, the bucket must not come back empty.
-$referenced = @($rows | Where-Object { $_.data.image -and "$($_.data.image)".Contains('/storage/v1/object/public/') })
-if ($referenced.Count -gt 0 -and $objects.Count -eq 0) {
-    throw "$($referenced.Count) recipes reference photos but the bucket listing was empty. Refusing to write a backup with no photos."
-}
-
-$ok = 0
+$map = @{}
+$totalOk = 0
+$totalObjects = 0
 $failed = @()
-foreach ($o in $objects) {
-    $url = "$SupabaseUrl/storage/v1/object/public/$Bucket/" + [Uri]::EscapeDataString($o.name)
-    $dest = Join-Path $photoDir $o.name
+
+foreach ($b in $Buckets) {
+    $bucketName = $b.Name
+    $field      = $b.Field
+    $destDir    = Join-Path $out $b.Folder
+
+    $listUri = "$SupabaseUrl/storage/v1/object/list/$bucketName"
     try {
-        Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -TimeoutSec 120
-        $ok++
+        $listResp = Invoke-WebRequest -Uri $listUri -Headers $headers -Method POST -ContentType 'application/json' -Body '{"prefix":"","limit":1000}' -UseBasicParsing -TimeoutSec 60
     } catch {
-        $failed += $o.name
+        # A bucket that has not been created yet is not a failure. One that exists and
+        # will not answer is, so only a 404 is forgiven.
+        if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) {
+            Write-Host ("  {0}: no such bucket, skipped" -f $bucketName)
+            continue
+        }
+        throw
+    }
+    $listed = $listResp.Content | ConvertFrom-Json
+    $objects = @($listed | Where-Object { $_.name -and -not $_.name.StartsWith('.') })
+    Write-Host ("  {0}: {1} entries listed, {2} are photos" -f $bucketName, $listed.Count, $objects.Count)
+
+    # A backup that quietly saves no photos is worse than one that fails, because it
+    # looks like it worked. If the table references photos in this bucket, the bucket
+    # must not come back empty.
+    $referenced = @($rows | Where-Object { $_.data.$field -and "$($_.data.$field)".Contains('/storage/v1/object/public/') })
+    if ($referenced.Count -gt 0 -and $objects.Count -eq 0) {
+        throw "$($referenced.Count) recipes reference photos in $bucketName but its listing was empty. Refusing to write a backup with no photos."
+    }
+
+    if ($objects.Count -gt 0) { New-Item -ItemType Directory -Force $destDir | Out-Null }
+    $ok = 0
+    foreach ($o in $objects) {
+        $url = "$SupabaseUrl/storage/v1/object/public/$bucketName/" + [Uri]::EscapeDataString($o.name)
+        $dest = Join-Path $destDir $o.name
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -TimeoutSec 120
+            $ok++
+        } catch {
+            $failed += "$bucketName/$($o.name)"
+        }
+    }
+    Write-Host ("  photos : {0} of {1} downloaded from {2}" -f $ok, $objects.Count, $bucketName)
+    $totalOk += $ok
+    $totalObjects += $objects.Count
+
+    # Records which photo belongs to which recipe, so a restore can rebuild the links
+    # even though the rows store absolute URLs that would change on a new project.
+    foreach ($r in $rows) {
+        $img = $r.data.$field
+        if ($img -and ("$img").Contains('/storage/v1/object/public/')) {
+            if (-not $map.ContainsKey($r.id)) { $map[$r.id] = [ordered]@{} }
+            $map[$r.id][$field] = [ordered]@{
+                bucket = $bucketName
+                file   = [Uri]::UnescapeDataString(("$img" -split '/')[-1])
+            }
+        }
     }
 }
-Write-Host ("  photos : {0} of {1} downloaded" -f $ok, $objects.Count)
 if ($failed.Count) { Write-Host ("  FAILED : {0}" -f ($failed -join ', ')) -ForegroundColor Red }
+$ok = $totalOk
+$objects = @(1..$totalObjects)
 
 # ---- Manifest ----------------------------------------------------------------
-# Records which photo belongs to which recipe, so a restore can rebuild the links even
-# though the rows store absolute URLs that would change on a new project.
-$map = @{}
-foreach ($r in $rows) {
-    $img = $r.data.image
-    if ($img -and ("$img").Contains('/storage/v1/object/public/')) {
-        $map[$r.id] = [Uri]::UnescapeDataString(("$img" -split '/')[-1])
-    }
-}
 $manifest = [ordered]@{
     takenAt        = (Get-Date).ToString('o')
     supabaseUrl    = $SupabaseUrl
-    bucket         = $Bucket
+    buckets        = @($Buckets | ForEach-Object { $_.Name })
     recipesTotal   = $rows.Count
     recipesLive    = $live.Count
     recipesDeleted = $dead.Count
@@ -135,21 +173,24 @@ $manifest = [ordered]@{
 $readme = @"
 Food Journal backup - $stamp
 
-  recipes.json   every row exactly as stored, tombstones included
-  recipes.txt    the same recipes in plain text, readable without any tooling
-  photos\        every object in the $Bucket bucket
-  manifest.json  counts, and which photo file belongs to which recipe id
+  recipes.json     every row exactly as stored, tombstones included
+  recipes.txt      the same recipes in plain text, readable without any tooling
+  photos\          every object in the recipe-photos bucket (AI plating strips)
+  photos-personal\ every object in the personal-photos bucket (photos of the
+                   finished dish). Absent if that bucket does not exist yet.
+  manifest.json    counts, and which photo file belongs to which recipe id
 
 To restore into a Supabase project:
 
-  1. Upload the files in photos\ to the $Bucket bucket.
+  1. Upload photos\ to recipe-photos, and photos-personal\ to personal-photos.
   2. For each entry in recipes.json, upsert { id, data } into the recipes table.
-     If the project ref changed, rewrite each data.image to point at the new
-     project's public URL. manifest.json maps recipe id to photo filename.
+     If the project ref changed, rewrite data.image and data.personalImage to
+     point at the new project's public URLs. manifest.json maps each recipe id
+     to the bucket and filename behind each of its two pictures.
   3. Recipes whose data.deleted is true are tombstones. Keep them. Dropping them
      lets any device still holding that recipe push it back.
 
-Verify a backup by opening recipes.txt and spot-checking photos\. If those two
+Verify a backup by opening recipes.txt and spot-checking both photo folders. If those two
 look right, the journal can be rebuilt.
 "@
 [IO.File]::WriteAllText((Join-Path $out 'README.txt'), $readme, [Text.Encoding]::UTF8)

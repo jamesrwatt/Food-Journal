@@ -88,6 +88,13 @@
      fit it and came out shorter rather than spreading, so a plating strip could never
      use the empty space beside it. Capping height alone lets a wide image run across
      and keeps a tall one from taking over the page. */
+  /* Both pictures on one line at one height. nowrap is the requirement; the overflow
+     is a safety net for the moment before fitPhotoRow has measured, and for the case
+     where it cannot run at all. */
+  .photo-row { display: flex; flex-wrap: nowrap; align-items: flex-start; gap: clamp(8px,1.2vw,16px); overflow-x: auto; }
+  /* Inside the row the shared height is set in script, so the width cap that governs a
+     lone photo must not also squeeze one of a pair and break the match. */
+  .photo-row .recipe-photo { flex: 0 0 auto; max-width: none; }
   .recipe-photo {
     display: block; max-width: 100%; max-height: 40vh;
     width: auto; height: auto; object-fit: contain;
@@ -275,7 +282,18 @@
   // code never has to care. contentOf() splits them apart again on the way out.
   const SUPABASE_URL = 'https://uhicczuwqolnowonqwfq.supabase.co';
   const SUPABASE_KEY = 'sb_publishable_SlLvi4eVDROg3pEfiI1xfg_aUhr6I0u';
+  // Two pictures, two buckets. The plating strip is generated and aspirational; the
+  // personal photo is what was actually cooked. Keeping them apart means either can be
+  // replaced, swept or restored without touching the other, and the existing bucket
+  // keeps its meaning: every photo already in it is a plating shot.
   const PHOTO_BUCKET = 'recipe-photos';
+  const PERSONAL_BUCKET = 'personal-photos';
+  // Which field, bucket and pending flag belong to each kind of photo, so the upload,
+  // retry and delete paths can be written once instead of twice.
+  const PHOTO_KINDS = {
+    plating:  { field: 'image',         pending: 'imagePendingUpload',         bucket: PHOTO_BUCKET,    suffix: 'plating' },
+    personal: { field: 'personalImage', pending: 'personalImagePendingUpload', bucket: PERSONAL_BUCKET, suffix: 'personal' }
+  };
   const POLL_MS = 30000;
   const PROFILE_KEY = 'foodJournalProfile';
   const PROFILE_FIELDS = ['shelf', 'rating', 'hidden', 'nextPhotoPromptAt', 'lastMade', 'shelfChangedAt'];
@@ -396,6 +414,47 @@
       headers: sbHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(alsoDelete && alsoDelete.length ? { alsoDelete: alsoDelete } : {})
     }).then(res => res.json()).catch(() => null);
+  }
+
+  // Asks the generate-plating function for a plating strip and points the recipe at it.
+  //
+  // The function does the storing as well as the generating, so what comes back is
+  // already a URL in the bucket. That is why this does not go through applyPhoto: there
+  // is no blob here to upload and no offline fallback to make -- generation needs the
+  // network by definition, so a failure is simply a failure, and the recipe keeps
+  // whatever it had.
+  function generatePlating(rec, onDone, onFail) {
+    const r = recipes.find(x => x.id === rec.id) || rec;
+    const was = r.imageStatus;
+    r.imageStatus = 'generating';
+    syncRender();
+    return fetch(SUPABASE_URL + '/functions/v1/generate-plating', {
+      method: 'POST',
+      headers: sbHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({
+        recipeId: r.id, title: r.title, tags: r.tags || [], ingredients: r.ingredients || []
+      })
+    })
+      .then(res => res.json().catch(() => ({ ok: false, error: 'The generator sent back nothing usable.' })))
+      .catch(() => ({ ok: false, error: 'Could not reach the generator - are you online?' }))
+      .then(out => {
+        // Re-resolve: a pull during a generation that takes half a minute can have
+        // replaced this object in the array.
+        const cur = recipes.find(x => x.id === rec.id) || r;
+        if (!out || !out.ok || !out.url) {
+          cur.imageStatus = was === 'generating' ? 'pending' : was;
+          syncRender();
+          if (onFail) onFail((out && out.error) || 'Generation failed.');
+          return false;
+        }
+        cur.image = out.url;
+        cur.imagePendingUpload = false;
+        cur.imageStatus = 'has-photo';
+        save(recipes);
+        syncRender();
+        if (onDone) onDone(out.url);
+        return true;
+      });
   }
 
   function cloudPull() {
@@ -617,13 +676,14 @@
     })));
   }
 
-  function uploadPhoto(recipeId, blob) {
-    const path = recipeId + '-' + Date.now() + '.jpg';
-    return fetch(SUPABASE_URL + '/storage/v1/object/' + PHOTO_BUCKET + '/' + path, {
+  function uploadPhoto(recipeId, blob, kind) {
+    const k = PHOTO_KINDS[kind] || PHOTO_KINDS.plating;
+    const path = recipeId + '-' + k.suffix + '-' + Date.now() + '.jpg';
+    return fetch(SUPABASE_URL + '/storage/v1/object/' + k.bucket + '/' + path, {
       method: 'POST', headers: sbHeaders({ 'Content-Type': 'image/jpeg' }), body: blob
     }).then(res => {
       if (!res.ok) return res.text().then(t => { throw new Error('upload ' + res.status + ' ' + t); });
-      return SUPABASE_URL + '/storage/v1/object/public/' + PHOTO_BUCKET + '/' + path;
+      return SUPABASE_URL + '/storage/v1/object/public/' + k.bucket + '/' + path;
     });
   }
 
@@ -633,16 +693,19 @@
   // photos taken before this sync landed predate the flag entirely: keying off it
   // would strand them as ~300 KB of base64 in the row, never reaching the bucket.
   function retryPendingPhotos() {
-    recipes.filter(r => r.image && r.image.indexOf('data:') === 0).forEach(r => {
-      fetch(r.image).then(res => res.blob())
-        .then(blob => uploadPhoto(r.id, blob))
-        .then(url => {
-          r.image = url;
-          r.imagePendingUpload = false;
-          save(recipes);
-          syncRender();
-        })
-        .catch(() => {});
+    Object.keys(PHOTO_KINDS).forEach(kind => {
+      const k = PHOTO_KINDS[kind];
+      recipes.filter(r => r[k.field] && r[k.field].indexOf('data:') === 0).forEach(r => {
+        fetch(r[k.field]).then(res => res.blob())
+          .then(blob => uploadPhoto(r.id, blob, kind))
+          .then(url => {
+            r[k.field] = url;
+            r[k.pending] = false;
+            save(recipes);
+            syncRender();
+          })
+          .catch(() => {});
+      });
     });
   }
 
@@ -806,20 +869,24 @@
   // Uploads the photo so everyone sees it, keeping it locally as a data URL if the
   // upload fails so it is not lost. Rolls the recipe back if even the local write is
   // rejected, so the view never shows a photo that did not persist anywhere.
-  function applyPhoto(rec, shot, after, onFail) {
+  function applyPhoto(rec, shot, after, onFail, kind) {
+    const k = PHOTO_KINDS[kind] || PHOTO_KINDS.plating;
     // A sync landing while the dialog is open replaces objects in `recipes` wholesale, so
     // the one captured when the dialog opened can already be detached from the array.
     // Writing to that stale copy would save nothing. Re-resolve by id at commit time.
     const r = recipes.find(x => x.id === rec.id) || rec;
     const fail = (m) => { if (onFail) onFail(m); };
     const prev = {
-      image: r.image, imageStatus: r.imageStatus,
-      nextPhotoPromptAt: r.nextPhotoPromptAt, imagePendingUpload: r.imagePendingUpload
+      image: r.image, imageStatus: r.imageStatus, imagePendingUpload: r.imagePendingUpload,
+      personalImage: r.personalImage, personalImagePendingUpload: r.personalImagePendingUpload,
+      nextPhotoPromptAt: r.nextPhotoPromptAt
     };
     const commit = (value, pending) => {
-      r.image = value;
-      r.imagePendingUpload = pending;
-      r.imageStatus = 'has-photo';
+      r[k.field] = value;
+      r[k.pending] = pending;
+      // imageStatus describes the plating photo only. A personal photo is known by its
+      // own field being set, so there is no second status to keep in step.
+      if (k === PHOTO_KINDS.plating) r.imageStatus = 'has-photo';
       r.nextPhotoPromptAt = null;
       if (!save(recipes)) {
         Object.assign(r, prev);
@@ -828,7 +895,7 @@
       }
       after();
     };
-    uploadPhoto(r.id, shot.blob)
+    uploadPhoto(r.id, shot.blob, kind)
       .then(url => { setCloudState('online'); commit(url, false); })
       .catch(() => { setCloudState('offline'); commit(shot.dataUrl, true); });
   }
@@ -984,7 +1051,7 @@
 
   function cardHtml(r) {
     const ratingBadge = r.rating != null ? `<span class="pill">${r.rating}/10</span>` : '';
-    const photoBadge = r.imageStatus === 'has-photo' ? '' : `<div class="no-photo-badge">No final photo yet</div>`;
+    const photoBadge = r.personalImage ? '' : `<div class="no-photo-badge">No final photo yet</div>`;
     const made = madeLabel(r.lastMade);
     const madeBadge = made ? `<div class="last-made">Last made ${escapeHtml(made)}</div>` : '';
     return `
@@ -1118,10 +1185,14 @@
   function deleteRecipe(rec) {
     if (!isAdmin()) return hideRecipe(rec);
     const r = recipes.find(x => x.id === rec.id) || rec;
-    // Note the photo before tombstoning, so it can be named to the sweep afterwards.
-    const photo = (typeof r.image === 'string' && r.image.indexOf('/storage/v1/object/public/') > 0)
-      ? decodeURIComponent(r.image.split('/').pop().split('?')[0])
-      : null;
+    // Note both photos before tombstoning, so they can be named to the sweep afterwards.
+    // Missing one here would not lose it quietly: it would sit in its bucket until the
+    // next sweep found it unreferenced, which is slower but not wrong. Naming both just
+    // means the bucket is tidy the moment the recipe goes.
+    const photos = Object.keys(PHOTO_KINDS)
+      .map(kind => r[PHOTO_KINDS[kind].field])
+      .filter(v => typeof v === 'string' && v.indexOf('/storage/v1/object/public/') > 0)
+      .map(v => decodeURIComponent(v.split('/').pop().split('?')[0]));
     r.deleted = true;
     r.deletedAt = new Date().toISOString();
     persistLocal(recipes);
@@ -1131,7 +1202,7 @@
     // as live, its photo still looks in use, and the sweep would skip the very thing it
     // was called for. If the push fails there is nothing to clean up yet either.
     clearTimeout(pushTimer);
-    cloudPush().then(ok => { if (ok) sweepPhotos(photo ? [photo] : []); });
+    cloudPush().then(ok => { if (ok) sweepPhotos(photos); });
   }
 
   function showSendModal(r) {
@@ -1190,7 +1261,9 @@
   }
 
   function maybeShowPhotoPrompt(r) {
-    if (r.imageStatus === 'has-photo' || r.imageStatus === 'ai-pending') return;
+    // This asks for a photo of what was cooked, never for a plating strip: the plating
+    // one generates itself and nobody needs prompting for it.
+    if (r.personalImage || r.personalSkipped) return;
     // Nothing in this build sets a snooze -- the 30 and 60 minute options were removed
     // because recipes get added in batches and the reminder was never the useful answer.
     // The check stays because a device still running older code can push one, and
@@ -1201,12 +1274,10 @@
     overlay.innerHTML = `
       <div class="modal">
         <h3>Add a photo?</h3>
-        <div>This recipe doesn't have a final photo yet. Add one now, or skip?</div>
+        <div>There's no photo of the one you made yet. Add one now, or skip?</div>
         <div class="opts">
           <button id="photoTake">Take Photo</button>
           <button id="photoChoose">Choose Existing</button>
-          <button id="photoPaste">Paste Photo</button>
-          ${r.sourceImages && r.sourceImages.length ? `<button id="photoSource">From Recipe's Page</button>` : ''}
           <button id="photoSkip" class="secondary">Skip</button>
         </div>
         <input type="file" id="photoFile" accept="image/*" class="hidden" style="margin-top:10px;">
@@ -1215,18 +1286,15 @@
     const close = () => document.body.removeChild(overlay);
     document.getElementById('photoTake').onclick = () => pickImage(document.getElementById('photoFile'), true);
     document.getElementById('photoChoose').onclick = () => pickImage(document.getElementById('photoFile'), false);
-    document.getElementById('photoPaste').onclick = () => { close(); openPastePhotoModal(r, () => renderDetail()); };
-    const promptSrcBtn = document.getElementById('photoSource');
-    if (promptSrcBtn) promptSrcBtn.onclick = () => { close(); openSourceImagePicker(r, () => renderDetail()); };
     document.getElementById('photoFile').onchange = e => {
       const file = e.target.files[0];
       if (!file) return;
       readImageDownscaled(file, shot => {
-        applyPhoto(r, shot, () => { close(); renderDetail(); }, m => alert(m));
+        applyPhoto(r, shot, () => { close(); renderDetail(); }, m => alert(m), 'personal');
       }, msg => alert(msg));
     };
     document.getElementById('photoSkip').onclick = () => {
-      r.imageStatus = 'ai-pending';
+      r.personalSkipped = true;
       r.nextPhotoPromptAt = null;
       save(recipes); close();
       renderDetail();
@@ -1561,7 +1629,7 @@
     return null;
   }
 
-  function openPastePhotoModal(r, after) {
+  function openPastePhotoModal(r, after, kind) {
     const overlay = document.createElement('div');
     overlay.className = 'overlay';
     overlay.innerHTML = `
@@ -1603,7 +1671,7 @@
       msg.className = 'importmsg';
       msg.textContent = 'Saving…';
       readImageDownscaled(file,
-        shot => applyPhoto(r, shot, () => { close(); after(); }, m => { busy = false; msg.className = 'importmsg err'; msg.textContent = m; }),
+        shot => applyPhoto(r, shot, () => { close(); after(); }, m => { busy = false; msg.className = 'importmsg err'; msg.textContent = m; }, kind || 'plating'),
         m => { busy = false; msg.className = 'importmsg err'; msg.textContent = m; });
     };
 
@@ -1621,7 +1689,7 @@
   // For an imported recipe, offer the photos that were on the source page. The chosen one
   // is fetched through the edge function and re-uploaded to our own bucket rather than
   // hotlinked, so it keeps working if the source site changes or disappears.
-  function openSourceImagePicker(r, after) {
+  function openSourceImagePicker(r, after, kind) {
     const overlay = document.createElement('div');
     overlay.className = 'overlay';
     overlay.innerHTML = `
@@ -1670,7 +1738,7 @@
           }))
           .then(shot => new Promise((resolve, reject) => {
             msg.textContent = 'Saving…';
-            applyPhoto(r, shot, resolve, m => reject(new Error(m)));
+            applyPhoto(r, shot, resolve, m => reject(new Error(m)), kind || 'plating');
           }))
           .then(() => { close(); after(); })
           // Every step above can reject. Without this the dialog just sat there with no
@@ -1680,39 +1748,124 @@
     });
   }
 
-  function openChangePhotoModal(r) {
-    const hasPhoto = r.imageStatus === 'has-photo';
+  // Two pictures, two dialogs, and deliberately different offers in each.
+  //
+  // The plating strip is generated, so its first option is to generate another; there is
+  // no Take Photo, because pointing a camera at a plating suggestion is not a thing that
+  // happens. The personal photo is the opposite: it is a photo of dinner, so it offers
+  // the camera and the gallery and nothing else. Keeping the wrong options out of each
+  // is most of what makes the split worth having.
+  function openPlatingPhotoModal(r) {
+    const has = !!r.image;
     const overlay = document.createElement('div');
     overlay.className = 'overlay';
     overlay.innerHTML = `
       <div class="modal">
-        <h3>${hasPhoto ? 'Replace Photo' : 'Add a Photo'}</h3>
-        <div>${hasPhoto ? 'Take or choose a new photo to replace the current one.' : 'Take a photo of this dish, or choose one you already have.'}</div>
+        <h3>Plating Photo</h3>
+        <div>${has
+          ? 'Generate a different set of plating ideas, or supply your own image.'
+          : 'Generate plating ideas for this recipe, or supply your own image.'}</div>
         <div class="opts">
-          <button id="changePhotoTake">Take Photo</button>
-          <button id="changePhotoChoose">Choose Existing</button>
-          <button id="changePhotoPaste">Paste Photo</button>
-          ${r.sourceImages && r.sourceImages.length ? `<button id="changePhotoSource">From Recipe's Page</button>` : ''}
-          <button id="changePhotoCancel" class="secondary">Cancel</button>
+          <button id="platingGen">${has ? 'Regenerate' : 'Generate'}</button>
+          <button id="platingChoose">Choose Existing</button>
+          <button id="platingPaste">Paste Photo</button>
+          ${r.sourceImages && r.sourceImages.length ? `<button id="platingSource">From Recipe's Page</button>` : ''}
+          <button id="platingCancel" class="secondary">Cancel</button>
         </div>
-        <input type="file" id="changePhotoFile" accept="image/*" class="hidden" style="margin-top:10px;">
+        <div id="platingMsg" class="importmsg"></div>
+        <input type="file" id="platingFile" accept="image/*" class="hidden" style="margin-top:10px;">
       </div>`;
     document.body.appendChild(overlay);
-    const close = () => document.body.removeChild(overlay);
-    document.getElementById('changePhotoTake').onclick = () => pickImage(document.getElementById('changePhotoFile'), true);
-    document.getElementById('changePhotoChoose').onclick = () => pickImage(document.getElementById('changePhotoFile'), false);
-    document.getElementById('changePhotoPaste').onclick = () => { close(); openPastePhotoModal(r, () => renderDetail()); };
-    const srcBtn = document.getElementById('changePhotoSource');
-    if (srcBtn) srcBtn.onclick = () => { close(); openSourceImagePicker(r, () => renderDetail()); };
-    document.getElementById('changePhotoFile').onchange = e => {
+    const close = () => { if (overlay.parentNode) document.body.removeChild(overlay); };
+    const msg = overlay.querySelector('#platingMsg');
+
+    document.getElementById('platingGen').onclick = () => {
+      const btn = document.getElementById('platingGen');
+      btn.disabled = true;
+      msg.className = 'importmsg';
+      msg.textContent = 'Generating - this takes a few seconds.';
+      generatePlating(r,
+        () => { close(); renderDetail(); },
+        m => { btn.disabled = false; msg.className = 'importmsg err'; msg.textContent = m; });
+    };
+    document.getElementById('platingChoose').onclick = () => pickImage(document.getElementById('platingFile'), false);
+    document.getElementById('platingPaste').onclick = () => { close(); openPastePhotoModal(r, () => renderDetail(), 'plating'); };
+    const srcBtn = document.getElementById('platingSource');
+    if (srcBtn) srcBtn.onclick = () => { close(); openSourceImagePicker(r, () => renderDetail(), 'plating'); };
+    document.getElementById('platingFile').onchange = e => {
       const file = e.target.files[0];
       if (!file) return;
-      readImageDownscaled(file, shot => {
-        applyPhoto(r, shot, () => { close(); renderDetail(); }, m => alert(m));
-      }, msg => alert(msg));
+      readImageDownscaled(file,
+        shot => applyPhoto(r, shot, () => { close(); renderDetail(); }, m => alert(m), 'plating'),
+        m => alert(m));
     };
-    document.getElementById('changePhotoCancel').onclick = () => close();
+    document.getElementById('platingCancel').onclick = close;
   }
+
+  function openPersonalPhotoModal(r) {
+    const has = !!r.personalImage;
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay';
+    overlay.innerHTML = `
+      <div class="modal">
+        <h3>${has ? 'Replace Your Photo' : 'Add Your Photo'}</h3>
+        <div>${has
+          ? 'Take or choose a new photo of the dish you made.'
+          : 'Take a photo of the dish you made, or choose one you already have.'}</div>
+        <div class="opts">
+          <button id="personalTake">Take Photo</button>
+          <button id="personalChoose">Choose Existing</button>
+          <button id="personalCancel" class="secondary">Cancel</button>
+        </div>
+        <input type="file" id="personalFile" accept="image/*" class="hidden" style="margin-top:10px;">
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => { if (overlay.parentNode) document.body.removeChild(overlay); };
+    document.getElementById('personalTake').onclick = () => pickImage(document.getElementById('personalFile'), true);
+    document.getElementById('personalChoose').onclick = () => pickImage(document.getElementById('personalFile'), false);
+    document.getElementById('personalFile').onchange = e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      readImageDownscaled(file,
+        shot => applyPhoto(r, shot, () => { close(); renderDetail(); }, m => alert(m), 'personal'),
+        m => alert(m));
+    };
+    document.getElementById('personalCancel').onclick = close;
+  }
+
+  // Gives every picture in the row one height, chosen so the whole row fits across the
+  // page on a single line.
+  //
+  // CSS alone cannot do this. Equal heights are easy and fitting the width is easy, but
+  // both at once needs the aspect ratios, and only the browser knows those once the
+  // images have loaded. So: add the ratios up, divide the space left after the gaps, and
+  // that is the height at which the row exactly fills the width. Cap it at the same 40vh
+  // a single photo gets, so a pair never takes more of the page than one would.
+  function fitPhotoRow() {
+    const row = app.querySelector('.photo-row');
+    if (!row) return;
+    const imgs = [...row.querySelectorAll('.recipe-photo')];
+    if (!imgs.length) return;
+    // A picture that has not loaded has no dimensions to contribute; it will call back.
+    if (imgs.some(i => !i.naturalWidth || !i.naturalHeight)) {
+      imgs.forEach(i => { if (!i.naturalWidth) i.addEventListener('load', fitPhotoRow, { once: true }); });
+      return;
+    }
+    const wrap = row.parentElement;
+    const cs = getComputedStyle(wrap);
+    const available = wrap.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+    const gap = parseFloat(getComputedStyle(row).columnGap) || 0;
+    const ratios = imgs.map(i => i.naturalWidth / i.naturalHeight);
+    const totalRatio = ratios.reduce((a, b) => a + b, 0);
+    const forImages = available - gap * (imgs.length - 1);
+    if (!(forImages > 0) || !(totalRatio > 0)) return;
+    // Never enlarge past the picture's own pixels - the same rule the full-screen
+    // viewer follows, and for the same reason: an upscaled photo is just a softer one.
+    const natural = Math.min.apply(null, imgs.map(i => i.naturalHeight));
+    const height = Math.min(forImages / totalRatio, window.innerHeight * 0.4, natural);
+    imgs.forEach(i => { i.style.height = height + 'px'; i.style.width = 'auto'; });
+  }
+  window.addEventListener('resize', () => { if (view.mode === 'detail') fitPhotoRow(); });
 
   function renderDetail() {
     const r = recipes.find(x => x.id === view.recipeId);
@@ -1720,11 +1873,22 @@
     // while it was open.
     if (!r || r.deleted || r.hidden) { view.mode = 'board'; return render(); }
 
-    const photoBadge = r.imageStatus === 'has-photo' ? '' :
-      `<span class="photo-pending-badge">${r.imageStatus === 'ai-pending' ? 'Photo pending (AI gen not connected)' : 'Photo pending'}</span>`;
-    const photoBlock = r.imageStatus === 'has-photo' && r.image
-      ? `<div class="photo-wrap"><img class="recipe-photo" src="${escapeHtml(r.image)}" alt="${escapeHtml(r.title)}"
-           role="button" tabindex="0" title="Tap to view full screen"></div>`
+    const photoBadge = r.image ? '' :
+      `<span class="photo-pending-badge">${r.imageStatus === 'generating' ? 'Generating plating photo…' : 'No plating photo'}</span>`;
+    // Plating first, then the photo of what was actually cooked: the suggestion, then
+    // the result. Both sit in one row at a single shared height, sized by fitPhotoRow
+    // once the browser knows how wide each really is.
+    const shots = [];
+    if (r.image) {
+      shots.push(`<img class="recipe-photo" data-kind="plating" src="${escapeHtml(r.image)}"
+        alt="Plating ideas for ${escapeHtml(r.title)}" role="button" tabindex="0" title="Tap to view full screen">`);
+    }
+    if (r.personalImage) {
+      shots.push(`<img class="recipe-photo" data-kind="personal" src="${escapeHtml(r.personalImage)}"
+        alt="${escapeHtml(r.title)} as made" role="button" tabindex="0" title="Tap to view full screen">`);
+    }
+    const photoBlock = shots.length
+      ? `<div class="photo-wrap"><div class="photo-row">${shots.join('')}</div></div>`
       : '';
 
     app.innerHTML = `
@@ -1734,7 +1898,8 @@
           <span style="color:var(--muted); font-size:0.85rem;">Shelf: <b>${r.shelf}</b></span>
           <button class="secondary" id="rateBtn">${r.rating != null ? `Rating: ${r.rating}/10 &middot; Update` : 'Add Rating'}</button>
           <button class="secondary" id="editBtn" style="margin-left:auto;">Edit</button>
-          <button class="secondary" id="changePhotoBtn">${r.imageStatus === 'has-photo' ? 'Replace Photo' : 'Change Photo'}</button>
+          <button class="secondary" id="platingPhotoBtn">${r.image ? 'Plating Photo' : 'Generate Plating'}</button>
+          <button class="secondary" id="personalPhotoBtn">${r.personalImage ? 'Replace My Photo' : 'Add My Photo'}</button>
           ${profilesAvailable && allProfiles.length > 1 ? `<button class="secondary" id="sendBtn">Send to…</button>` : ''}
           <button class="secondary danger" id="deleteBtn">${isAdmin() ? 'Delete' : 'Remove'}</button>
         </div>
@@ -1780,15 +1945,17 @@
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openTextViewer(z); }
       };
     });
-    const photoEl = app.querySelector('.recipe-photo');
-    if (photoEl) {
-      const openIt = () => openPhotoViewer(r.image, r.title);
-      photoEl.onclick = openIt;
-      photoEl.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openIt(); } };
-    }
+    // Each picture opens itself, not whichever one happens to be first.
+    app.querySelectorAll('.recipe-photo').forEach(el => {
+      const openIt = () => openPhotoViewer(el.getAttribute('src'), r.title);
+      el.onclick = openIt;
+      el.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openIt(); } };
+    });
+    fitPhotoRow();
     const sendBtn = document.getElementById('sendBtn');
     if (sendBtn) sendBtn.onclick = () => showSendModal(r);
-    document.getElementById('changePhotoBtn').onclick = () => openChangePhotoModal(r);
+    document.getElementById('platingPhotoBtn').onclick = () => openPlatingPhotoModal(r);
+    document.getElementById('personalPhotoBtn').onclick = () => openPersonalPhotoModal(r);
     maybeShowPhotoPrompt(r);
   }
 
@@ -1950,6 +2117,13 @@
       save(recipes);
       view.mode = 'board';
       render();
+      // A new recipe gets its plating strip without being asked. The whole point of the
+      // strip is to suggest how a dish might look before it has ever been cooked, which
+      // is exactly when a recipe is new, so waiting for someone to press a button would
+      // miss the moment it is most useful. Failures are deliberately silent here: the
+      // recipe saved, which is what the person asked for, and the Plating Photo button
+      // says what went wrong if they go looking.
+      generatePlating(rec, null, () => {});
     };
   }
 

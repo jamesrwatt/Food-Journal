@@ -32,7 +32,11 @@
 param(
     [Parameter(Mandatory = $true)][string]$Path,
     [string]$ProfileId = 'dad',
-    [switch]$WhatIf
+    [switch]$WhatIf,
+    # A new recipe gets an AI plating strip without being asked, the same as one typed
+    # into the app. Most recipes arrive through this script, so leaving it out here
+    # would mean most recipes never got one.
+    [switch]$NoPlating
 )
 
 $ErrorActionPreference = 'Stop'
@@ -101,4 +105,37 @@ $check = (Invoke-WebRequest -Uri "$SupabaseUrl/rest/v1/recipes?id=eq.$id&select=
 if (@($check).Count -eq 0) { throw "The recipe did not land. Nothing was saved." }
 $saved = $check[0].data
 Write-Host ("Saved: {0} - {1} ingredients, {2} steps" -f $saved.title, @($saved.ingredients).Count, @($saved.instructions).Count)
+
+# Generation is deliberately after the read-back. The recipe is the thing that matters
+# and it is already safely stored; a plating strip is decoration, so a failure here
+# reports itself and changes nothing. The photo can always be generated later from the
+# Plating Photo button.
+if (-not $NoPlating) {
+    Write-Host "Generating plating photo..."
+    $genBody = @{ recipeId = $id; title = $r.title; tags = @($r.tags); ingredients = @($r.ingredients) } |
+        ConvertTo-Json -Depth 10 -Compress
+    try {
+        $genResp = Invoke-WebRequest -Uri "$SupabaseUrl/functions/v1/generate-plating" -Headers $headers `
+            -Method POST -ContentType 'application/json' -Body ([Text.Encoding]::UTF8.GetBytes($genBody)) `
+            -UseBasicParsing -TimeoutSec 120
+        $gen = $genResp.Content | ConvertFrom-Json
+        if ($gen.ok) {
+            # The function stores the image but does not touch the recipe row, so the
+            # link is made here.
+            $saved | Add-Member -NotePropertyName image -NotePropertyValue $gen.url -Force
+            $saved | Add-Member -NotePropertyName imageStatus -NotePropertyValue 'has-photo' -Force
+            $patch = (@{ id = $id; data = $saved } | ConvertTo-Json -Depth 20 -Compress)
+            Invoke-WebRequest -Uri "$SupabaseUrl/rest/v1/recipes?on_conflict=id" `
+                -Headers ($headers + @{ Prefer = 'resolution=merge-duplicates,return=minimal' }) `
+                -Method POST -ContentType 'application/json' -Body ([Text.Encoding]::UTF8.GetBytes("[$patch]")) `
+                -UseBasicParsing | Out-Null
+            Write-Host ("  plating: {0}" -f $gen.url)
+        } else {
+            Write-Host ("  plating: skipped - {0}" -f $gen.error) -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Host ("  plating: skipped - {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+    }
+}
+
 Write-Host "It will appear on devices within about 30 seconds."

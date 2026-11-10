@@ -15,7 +15,19 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { withSupabase } from "jsr:@supabase/server@^1";
 
-const BUCKET = "recipe-photos";
+// A recipe now carries two pictures that live in two different places: the AI plating
+// strip, and the photo of what was actually cooked. Each bucket is swept against the
+// field that references it, and only that field -- pairing them the other way round
+// would make every photo in each bucket look orphaned.
+//
+// A bucket that does not exist yet is skipped rather than treated as empty. This file
+// has to be deployed before the personal bucket is created, because the alternative
+// order is a window where the app is storing photos that cleanup does not know about
+// and will delete. Skipping the missing one makes that order safe.
+const BUCKETS = [
+  { bucket: "recipe-photos", field: "image" },
+  { bucket: "personal-photos", field: "personalImage" },
+] as const;
 
 function projectUrl() {
   const u = Deno.env.get("SUPABASE_URL");
@@ -66,93 +78,111 @@ export default {
       const key = privilegedKey();
       const h = adminHeaders(key);
 
-      // Everything currently in the bucket.
-      const listRes = await fetch(`${url}/storage/v1/object/list/${BUCKET}`, {
-        method: "POST",
-        headers: h,
-        body: JSON.stringify({ prefix: "", limit: 1000 }),
-      });
-      if (!listRes.ok) throw new Error(`Could not list the bucket (${listRes.status}).`);
-      const objects: Array<{ name: string; created_at?: string; updated_at?: string }> =
-        await listRes.json();
-
-      // Every image a *live* recipe points at.
+      // Every recipe, read once and reused for both buckets.
       const rowsRes = await fetch(`${url}/rest/v1/recipes?select=data`, { headers: h });
       if (!rowsRes.ok) throw new Error(`Could not read recipes (${rowsRes.status}).`);
-      const rows: Array<{ data: { image?: string | null; deleted?: boolean } }> =
-        await rowsRes.json();
-      const inUse = new Set<string>();
-      for (const row of rows) {
-        // A deleted recipe keeps its row and its image field as a tombstone, but nothing
-        // shows that photo any more. Counting it as in-use is what would make cleanup a
-        // no-op for exactly the case it is most needed: the photo of a deleted recipe.
-        if (row?.data?.deleted) continue;
-        const img = row?.data?.image;
-        if (typeof img === "string" && img) {
-          // Compare on the object name, since the row stores a full public URL.
-          inUse.add(decodeURIComponent(img.split("/").pop()!.split("?")[0]));
-        }
-      }
+      const rows: Array<
+        { data: { image?: string | null; personalImage?: string | null; deleted?: boolean } }
+      > = await rowsRes.json();
 
-      // If the recipe read came back empty, every object would look unreferenced and the
-      // whole bucket would be swept. An empty table is far more likely to be a transient
-      // fault than a real state worth acting on, so refuse rather than guess.
-      if (!rows.length && objects.length) {
-        throw new Error(
-          "No recipes came back, so every photo would look orphaned. Refusing to delete anything.",
-        );
-      }
-
-      // A photo uploaded moments ago may simply not have had its recipe row pushed yet;
-      // on someone else's phone that gap can be seconds on poor wifi. Sweeping it would
-      // delete a picture that was just taken, so recent objects are left alone — unless a
-      // caller names one explicitly, which the app does after a delete, when it already
-      // knows for certain that recipe is gone.
-      //
-      // Either way the in-use check comes first, so a named object belonging to a live
-      // recipe is still refused. The caller can only ever hurry along a real orphan.
       const now = Date.now();
       const named = new Set(alsoDelete);
-      const orphans = objects
-        .filter((o) => {
-          if (!o.name || o.name.startsWith(".")) return false;
-          if (inUse.has(o.name)) return false;
-          if (named.has(o.name)) return true;
-          const t = Date.parse(o.created_at || o.updated_at || "");
-          return !Number.isFinite(t) || now - t >= minAgeMs;
-        })
-        .map((o) => o.name);
+      const report: Record<string, unknown> = {};
+      let anyDeleted: string[] = [];
+      let anyOrphans: string[] = [];
 
-      if (dryRun) {
-        return Response.json({
-          ok: true,
-          dryRun: true,
-          total: objects.length,
-          inUse: inUse.size,
-          orphans,
+      for (const { bucket, field } of BUCKETS) {
+        // Everything currently in this bucket.
+        const listRes = await fetch(`${url}/storage/v1/object/list/${bucket}`, {
+          method: "POST",
+          headers: h,
+          body: JSON.stringify({ prefix: "", limit: 1000 }),
         });
+        // A bucket that has not been created yet is not an error; there is simply
+        // nothing of its kind to tidy. Anything else is.
+        if (listRes.status === 404) {
+          report[bucket] = { skipped: "no such bucket" };
+          continue;
+        }
+        if (!listRes.ok) throw new Error(`Could not list ${bucket} (${listRes.status}).`);
+        const objects: Array<{ name: string; created_at?: string; updated_at?: string }> =
+          await listRes.json();
+
+        // Every image a *live* recipe points at through this bucket's own field.
+        const inUse = new Set<string>();
+        for (const row of rows) {
+          // A deleted recipe keeps its row and its image fields as a tombstone, but
+          // nothing shows those photos any more. Counting them as in-use is what would
+          // make cleanup a no-op for exactly the case it is most needed.
+          if (row?.data?.deleted) continue;
+          const img = (row?.data as Record<string, unknown> | undefined)?.[field];
+          if (typeof img === "string" && img) {
+            // Compare on the object name, since the row stores a full public URL.
+            inUse.add(decodeURIComponent(img.split("/").pop()!.split("?")[0]));
+          }
+        }
+
+        // If the recipe read came back empty, every object would look unreferenced and
+        // the whole bucket would be swept. An empty table is far more likely to be a
+        // transient fault than a real state worth acting on, so refuse rather than guess.
+        if (!rows.length && objects.length) {
+          throw new Error(
+            "No recipes came back, so every photo would look orphaned. Refusing to delete anything.",
+          );
+        }
+
+        // A photo uploaded moments ago may simply not have had its recipe row pushed
+        // yet; on someone else's phone that gap can be seconds on poor wifi. Sweeping it
+        // would delete a picture that was just taken, so recent objects are left alone --
+        // unless a caller names one explicitly, which the app does after a delete, when
+        // it already knows for certain that recipe is gone.
+        //
+        // Either way the in-use check comes first, so a named object belonging to a live
+        // recipe is still refused. The caller can only ever hurry along a real orphan.
+        const orphans = objects
+          .filter((o) => {
+            if (!o.name || o.name.startsWith(".")) return false;
+            if (inUse.has(o.name)) return false;
+            if (named.has(o.name)) return true;
+            const t = Date.parse(o.created_at || o.updated_at || "");
+            return !Number.isFinite(t) || now - t >= minAgeMs;
+          })
+          .map((o) => o.name);
+
+        anyOrphans = anyOrphans.concat(orphans);
+
+        if (dryRun) {
+          report[bucket] = { total: objects.length, inUse: inUse.size, orphans };
+          continue;
+        }
+
+        let deleted: string[] = [];
+        if (orphans.length) {
+          const delRes = await fetch(`${url}/storage/v1/object/${bucket}`, {
+            method: "DELETE",
+            headers: h,
+            body: JSON.stringify({ prefixes: orphans }),
+          });
+          if (!delRes.ok) {
+            throw new Error(`Delete failed in ${bucket} (${delRes.status}): ${await delRes.text()}`);
+          }
+          deleted = orphans;
+        }
+        anyDeleted = anyDeleted.concat(deleted);
+        report[bucket] = { total: objects.length, inUse: inUse.size, deleted };
       }
 
-      let deleted: string[] = [];
-      if (orphans.length) {
-        const delRes = await fetch(`${url}/storage/v1/object/${BUCKET}`, {
-          method: "DELETE",
-          headers: h,
-          body: JSON.stringify({ prefixes: orphans }),
-        });
-        if (!delRes.ok) {
-          throw new Error(`Delete failed (${delRes.status}): ${await delRes.text()}`);
-        }
-        deleted = orphans;
+      if (dryRun) {
+        return Response.json({ ok: true, dryRun: true, buckets: report, orphans: anyOrphans });
       }
 
       return Response.json({
         ok: true,
         dryRun: false,
-        total: objects.length,
-        inUse: inUse.size,
-        deleted,
+        buckets: report,
+        deleted: anyDeleted,
       });
+
     } catch (e) {
       return Response.json({
         ok: false,
